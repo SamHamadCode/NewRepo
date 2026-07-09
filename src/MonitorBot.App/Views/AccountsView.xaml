@@ -1,0 +1,111 @@
+<UserControl x:Class="MonitorBot.App.Views.AccountsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="240"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Sidebar List -->
+        <DockPanel Grid.Column="0" Margin="24,24,0,24">
+            <StackPanel DockPanel.Dock="Top" Style="{StaticResource Toolbar}">
+                <TextBlock Text="Accounts" Style="{StaticResource TextH1}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <Button Content="+" Style="{StaticResource PrimaryButton}" Width="32"
+                        Command="{Binding AddCommand}"/>
+            </StackPanel>
+            <ListBox ItemsSource="{Binding Accounts}"
+                     SelectedItem="{Binding Selected, Mode=TwoWay}"
+                     DisplayMemberPath="Name"/>
+        </DockPanel>
+
+        <Rectangle Grid.Column="0" Width="1" HorizontalAlignment="Right" Fill="{StaticResource Border}"/>
+
+        <!-- Editor -->
+        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24" IsEnabled="{Binding IsEditing}">
+                <TextBlock Text="Account Details" Style="{StaticResource SectionHeader}"/>
+
+                <StackPanel Style="{StaticResource FormRow}">
+                    <TextBlock Text="Name" Style="{StaticResource TextLabel}"/>
+                    <TextBox Text="{Binding Selected.Name, UpdateSourceTrigger=PropertyChanged}"/>
+                </StackPanel>
+                <StackPanel Style="{StaticResource FormRow}">
+                    <TextBlock Text="Site" Style="{StaticResource TextLabel}"/>
+                    <TextBox Text="{Binding Selected.SiteName, UpdateSourceTrigger=PropertyChanged}"/>
+                </StackPanel>
+                <StackPanel Style="{StaticResource FormRow}">
+                    <TextBlock Text="Email" Style="{StaticResource TextLabel}"/>
+                    <TextBox Text="{Binding Selected.Email, UpdateSourceTrigger=PropertyChanged}"/>
+                </StackPanel>
+                <StackPanel Style="{StaticResource FormRow}">
+                    <TextBlock Text="Password" Style="{StaticResource TextLabel}"/>
+                    <TextBox Text="{Binding Selected.Password, UpdateSourceTrigger=PropertyChanged}"/>
+                </StackPanel>
+                <StackPanel Style="{StaticResource FormRow}">
+                    <TextBlock Text="2FA Secret (optional)" Style="{StaticResource TextLabel}"/>
+                    <TextBox Text="{Binding Selected.TwoFactorSecret, UpdateSourceTrigger=PropertyChanged}"/>
+                </StackPanel>
+                <CheckBox Content="Active" IsChecked="{Binding Selected.IsActive}" Margin="0,0,0,16"/>
+
+                <!-- Email Verification (IMAP) -->
+                <TextBlock Text="Email Verification" Style="{StaticResource TextH2}" Margin="0,8,0,12"/>
+
+                <CheckBox Content="Auto-fetch verification code from email"
+                          IsChecked="{Binding Selected.UseEmailVerification}"
+                          Margin="0,0,0,12"
+                          ToolTip="When Target sends a verification code to your email, MonitorBot will fetch it automatically via IMAP"/>
+
+                <StackPanel Visibility="{Binding Selected.UseEmailVerification, Converter={StaticResource BoolToVisibility}}">
+
+                    <Border Background="#12181F" BorderBrush="{StaticResource Border}"
+                            BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,12">
+                        <TextBlock TextWrapping="Wrap" Style="{StaticResource TextCaption}">
+                            Gmail: imap.gmail.com port 993&#x0a;Outlook: outlook.office365.com port 993&#x0a;Yahoo: imap.mail.yahoo.com port 993&#x0a;&#x0a;Use your email app password, not your regular password.
+                        </TextBlock>
+                    </Border>
+
+                    <StackPanel Style="{StaticResource FormRow}">
+                        <TextBlock Text="IMAP Host" Style="{StaticResource TextLabel}"/>
+                        <TextBox Text="{Binding Selected.ImapHost, UpdateSourceTrigger=PropertyChanged}"
+                                 Tag="e.g. imap.gmail.com"/>
+                    </StackPanel>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Port" Style="{StaticResource TextLabel}"/>
+                            <TextBox Text="{Binding Selected.ImapPort, UpdateSourceTrigger=PropertyChanged}"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Use SSL" Style="{StaticResource TextLabel}"/>
+                            <CheckBox IsChecked="{Binding Selected.ImapUseSsl}" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <StackPanel Style="{StaticResource FormRow}">
+                        <TextBlock Text="IMAP Email (if different from site email)" Style="{StaticResource TextLabel}"/>
+                        <TextBox Text="{Binding Selected.ImapEmail, UpdateSourceTrigger=PropertyChanged}"/>
+                    </StackPanel>
+
+                    <StackPanel Style="{StaticResource FormRow}">
+                        <TextBlock Text="IMAP / App Password" Style="{StaticResource TextLabel}"/>
+                        <TextBox Text="{Binding Selected.ImapPassword, UpdateSourceTrigger=PropertyChanged}"/>
+                    </StackPanel>
+
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Save Account" Style="{StaticResource PrimaryButton}"
+                            Command="{Binding SaveCommand}" Margin="0,0,8,0"/>
+                    <Button Content="Delete" Style="{StaticResource DangerButton}"
+                            Command="{Binding DeleteCommand}"/>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

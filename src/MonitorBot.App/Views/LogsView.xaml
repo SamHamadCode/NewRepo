@@ -1,0 +1,37 @@
+<UserControl x:Class="MonitorBot.App.Views.LogsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <DockPanel Margin="24">
+
+        <StackPanel DockPanel.Dock="Top" Style="{StaticResource Toolbar}">
+            <TextBlock Text="Logs" Style="{StaticResource TextH1}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBox Width="200" Text="{Binding Filter, UpdateSourceTrigger=PropertyChanged}"
+                     Tag="Filter logs..." Margin="0,0,8,0"/>
+            <Button Content="Refresh" Style="{StaticResource SecondaryButton}"
+                    Command="{Binding RefreshCommand}" Margin="0,0,6,0"/>
+            <Button Content="Clear" Style="{StaticResource DangerButton}"
+                    Command="{Binding ClearCommand}"/>
+        </StackPanel>
+
+        <DataGrid ItemsSource="{Binding Entries}"
+                  IsReadOnly="True"
+                  FontFamily="Consolas"
+                  FontSize="12">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="TIME"
+                                    Binding="{Binding Timestamp, StringFormat={}{0:HH:mm:ss.fff}}"
+                                    Width="90"/>
+                <DataGridTemplateColumn Header="LEVEL" Width="60">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Level}"
+                                       Foreground="{Binding Level, Converter={StaticResource LevelToColor}}"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="CATEGORY" Binding="{Binding Category}" Width="120"/>
+                <DataGridTextColumn Header="MESSAGE"  Binding="{Binding Message}"  Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</UserControl>

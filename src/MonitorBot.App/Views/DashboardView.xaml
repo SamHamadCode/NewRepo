@@ -1,0 +1,74 @@
+<UserControl x:Class="MonitorBot.App.Views.DashboardView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+
+            <!-- Header -->
+            <TextBlock Text="Dashboard" Style="{StaticResource TextH1}" Margin="0,0,0,24"/>
+
+            <!-- Stat Cards Row -->
+            <WrapPanel Margin="0,0,0,24">
+                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
+                    <StackPanel>
+                        <TextBlock Text="TOTAL TASKS" Style="{StaticResource TextCaption}"/>
+                        <TextBlock Text="{Binding TotalTasks}" FontSize="32" FontWeight="Bold"
+                                   Foreground="{StaticResource Accent}" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
+                    <StackPanel>
+                        <TextBlock Text="RUNNING" Style="{StaticResource TextCaption}"/>
+                        <TextBlock Text="{Binding RunningTasks}" FontSize="32" FontWeight="Bold"
+                                   Foreground="{StaticResource Success}" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
+                    <StackPanel>
+                        <TextBlock Text="SUCCESSES" Style="{StaticResource TextCaption}"/>
+                        <TextBlock Text="{Binding SuccessCount}" FontSize="32" FontWeight="Bold"
+                                   Foreground="{StaticResource Success}" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
+                    <StackPanel>
+                        <TextBlock Text="FAILURES" Style="{StaticResource TextCaption}"/>
+                        <TextBlock Text="{Binding FailureCount}" FontSize="32" FontWeight="Bold"
+                                   Foreground="{StaticResource Danger}" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
+
+            <!-- Update Banner -->
+            <Border Style="{StaticResource Card}" Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button Content="Install Update"
+                                Style="{StaticResource PrimaryButton}"
+                                Command="{Binding InstallUpdateCommand}"
+                                Margin="0,0,8,0"/>
+                        <Button Content="Check Again"
+                                Style="{StaticResource SecondaryButton}"
+                                Command="{Binding CheckUpdateCommand}"/>
+                    </StackPanel>
+                    <StackPanel>
+                        <TextBlock Text="?? Update Available" Style="{StaticResource TextH2}"
+                                   Foreground="{StaticResource Warning}"/>
+                        <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextCaption}"
+                                   Margin="0,4,0,0"/>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Up to date message -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0"
+                    Visibility="{Binding HasUpdate, Converter={StaticResource InverseBoolToVisibility}}">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="? " FontSize="16"/>
+                    <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextBody}"/>
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
