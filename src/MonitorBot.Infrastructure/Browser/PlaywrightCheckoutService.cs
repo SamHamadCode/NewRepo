@@ -1,4 +1,6 @@
 using System;
+using System;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -39,6 +41,26 @@ namespace MonitorBot.Infrastructure.Browser
             _settings = settings;
         }
 
+        /// <summary>
+        /// Returns a per-account persistent browser profile directory.
+        /// Storing cookies/session data here means Target/Walmart remember the browser
+        /// between runs, preventing forced re-login on every checkout attempt.
+        /// </summary>
+        private static string GetProfileDir(SiteAccount? account)
+        {
+            var baseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "MonitorBot", "BrowserProfiles");
+
+            var profileName = account != null
+                ? $"account_{account.Id}"
+                : "guest";
+
+            var dir = Path.Combine(baseDir, profileName);
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
         public async Task<CheckoutResult> CheckoutAsync(
             MonitorTask task,
             UserProfile profile,
@@ -63,44 +85,43 @@ namespace MonitorBot.Infrastructure.Browser
                 isTarget ? "Target" : "Walmart", task.TargetUrl);
 
             IPlaywright? playwright = null;
-            IBrowser?    browser   = null;
+            IBrowserContext? context = null;
 
             try
             {
                 playwright = await Playwright.CreateAsync();
 
-                // Launch stealth Chromium — args suppress common bot-detection signals
-                browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-                {
-                    Headless = _settings.Current.HeadlessBrowser,
-                    Args = new[]
-                    {
-                        "--no-sandbox",
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage",
-                        "--disable-web-security",
-                        "--disable-features=IsolateOrigins,site-per-process"
-                    }
-                });
+                // Use a persistent profile directory so cookies/session survive between runs.
+                // Each account gets its own profile so sessions don't conflict.
+                var profileDir = GetProfileDir(account);
 
-                var context = await browser.NewContextAsync(new BrowserNewContextOptions
-                {
-                    UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                                "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                "Chrome/124.0.0.0 Safari/537.36",
-                    ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-                    Locale = "en-US",
-                    TimezoneId = "America/New_York",
-                    ExtraHTTPHeaders = new System.Collections.Generic.Dictionary<string, string>
+                context = await playwright.Chromium.LaunchPersistentContextAsync(profileDir,
+                    new BrowserTypeLaunchPersistentContextOptions
                     {
-                        ["Accept-Language"] = "en-US,en;q=0.9"
-                    }
-                });
+                        Headless = _settings.Current.HeadlessBrowser,
+                        UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                                    "Chrome/124.0.0.0 Safari/537.36",
+                        ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                        Locale = "en-US",
+                        TimezoneId = "America/New_York",
+                        Args = new[]
+                        {
+                            "--no-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                            "--disable-features=IsolateOrigins,site-per-process"
+                        },
+                        ExtraHTTPHeaders = new System.Collections.Generic.Dictionary<string, string>
+                        {
+                            ["Accept-Language"] = "en-US,en;q=0.9"
+                        }
+                    });
 
-                // Patch navigator.webdriver so sites can't detect automation
+                // Patch navigator.webdriver on every page in this context
                 await context.AddInitScriptAsync(@"
                     Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+                    Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
                     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                     window.chrome = { runtime: {} };
                 ");
@@ -125,7 +146,7 @@ namespace MonitorBot.Infrastructure.Browser
             }
             finally
             {
-                if (browser != null) await browser.CloseAsync();
+                if (context != null) await context.CloseAsync();
                 playwright?.Dispose();
             }
 
@@ -149,13 +170,37 @@ namespace MonitorBot.Infrastructure.Browser
                     result.ErrorMessage = $"Target login failed for {account.Email}";
                     return result;
                 }
+
+                // Brief pause to let session cookies fully settle before navigating
+                await page.WaitForTimeoutAsync(2000);
             }
 
-            // Navigate to product
-            await page.GotoAsync(task.TargetUrl, new PageGotoOptions { Timeout = 30000 });
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            // Navigate to product — session cookies from login carry over in the same context
+            await page.GotoAsync(task.TargetUrl, new PageGotoOptions
+            {
+                Timeout = 30000,
+                WaitUntil = WaitUntilState.DOMContentLoaded
+            });
+            await page.WaitForTimeoutAsync(3000);
+
+            // If Target redirected back to login, session was lost
+            if (page.Url.Contains("/login") || page.Url.Contains("create_session"))
+            {
+                result.Status = CheckoutStatus.Failed;
+                result.ErrorMessage = "Target session expired after navigation — try again";
+                return result;
+            }
 
             await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
+
+            // Wait for add-to-cart button to render (JS-loaded)
+            try
+            {
+                await page.WaitForSelectorAsync(
+                    "[data-test='shoppingCartButton'], button:has-text('Add to cart')",
+                    new PageWaitForSelectorOptions { Timeout = 15000 });
+            }
+            catch { }
 
             // Add to cart
             var addToCart = page.Locator("[data-test='shoppingCartButton'], button:has-text('Add to cart')").First;
@@ -172,6 +217,8 @@ namespace MonitorBot.Infrastructure.Browser
             // Go to checkout
             await page.GotoAsync("https://www.target.com/co-cart");
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            await page.WaitForTimeoutAsync(2000);
+            await HandleTargetReauthModalAsync(page, account, ct);
             await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
 
             // Click checkout
@@ -180,16 +227,20 @@ namespace MonitorBot.Infrastructure.Browser
                 await checkout.ClickAsync();
 
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            await page.WaitForTimeoutAsync(2000);
+            await HandleTargetReauthModalAsync(page, account, ct);
             await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
 
-            // Fill shipping (guest or continue)
-            await FillTargetShippingAsync(page, profile, account);
-
-            // Fill payment
-            await FillTargetPaymentAsync(page, profile);
-
-            // Place order
+            // If checkout page is already fully pre-filled (saved payment on file), skip shipping/payment steps
             var placeOrder = page.Locator("button:has-text('Place your order'), button:has-text('Place order')").First;
+            if (!await placeOrder.IsVisibleAsync())
+            {
+                // Fill shipping (guest or continue)
+                await FillTargetShippingAsync(page, profile, account);
+
+                // Fill payment
+                await FillTargetPaymentAsync(page, profile);
+            }
             if (!await placeOrder.IsVisibleAsync())
             {
                 result.Status = CheckoutStatus.Failed;
@@ -198,6 +249,22 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             await placeOrder.ClickAsync();
+
+            // Wait for Target's confirmation page — it navigates to /order-confirmation/{id}
+            // Can take up to 30s depending on payment processing
+            try
+            {
+                await page.WaitForURLAsync(
+                    url => url.Contains("order-confirmation") || url.Contains("order-details"),
+                    new PageWaitForURLOptions { Timeout = 30000 });
+            }
+            catch
+            {
+                // URL may not change on some flows — wait for DOM to settle
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForTimeoutAsync(5000);
+            }
+
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
             var orderId = await ExtractTargetOrderIdAsync(page);
@@ -210,44 +277,247 @@ namespace MonitorBot.Infrastructure.Browser
             }
             else
             {
-                result.Status = CheckoutStatus.CardDeclined;
-                result.ErrorMessage = "Order not confirmed — check card details or review page.";
+                // Check if still on checkout page (button click may have failed)
+                var currentUrl = page.Url;
+                if (currentUrl.Contains("/checkout") || currentUrl.Contains("/co-"))
+                {
+                    result.Status = CheckoutStatus.Failed;
+                    result.ErrorMessage = "Place order click did not navigate — order may not have been submitted.";
+                }
+                else
+                {
+                    result.Status = CheckoutStatus.CardDeclined;
+                    result.ErrorMessage = "Order not confirmed — check card details or review page.";
+                }
             }
 
             return result;
         }
 
+        /// <summary>
+        /// Handles the inline re-authentication modal Target shows on cart/checkout pages.
+        /// It appears as a slide-in panel with "Enter your password" option.
+        /// </summary>
+        private async Task HandleTargetReauthModalAsync(IPage page, SiteAccount? account, CancellationToken ct)
+        {
+            if (account == null) return;
+            try
+            {
+                // Check if the reauth modal is visible (contains "Sign in to your account" heading)
+                var modalHeading = page.GetByText("Sign in to your account").First;
+                if (!await modalHeading.IsVisibleAsync()) return;
+
+                _logger.LogInformation("Target reauth modal detected — signing in again");
+
+                // Click "Enter your password"
+                var enterPw = page.GetByText("Enter your password", new() { Exact = true });
+                if (await enterPw.IsVisibleAsync())
+                    await enterPw.ClickAsync();
+                else
+                {
+                    var enterPwFallback = page.Locator("*:has-text('Enter your password')").Last;
+                    if (await enterPwFallback.IsVisibleAsync())
+                        await enterPwFallback.ClickAsync();
+                }
+
+                await page.WaitForTimeoutAsync(1500);
+
+                // Fill password
+                var passwordInput = page.Locator("input[type='password'], input[autocomplete='current-password']").First;
+                if (await passwordInput.IsVisibleAsync())
+                {
+                    await passwordInput.FillAsync(account.Password);
+                    // Press Enter — more reliable than clicking the button inside the modal
+                    await passwordInput.PressAsync("Enter");
+                }
+
+                await page.WaitForTimeoutAsync(3000);
+
+                // Dismiss Circle prompt if it appears again
+                var dontJoin = page.GetByText("Don't join", new() { Exact = true });
+                var maybeLater = page.GetByText("Maybe later", new() { Exact = true });
+                if (await dontJoin.IsVisibleAsync())
+                    await dontJoin.ClickAsync();
+                else if (await maybeLater.IsVisibleAsync())
+                    await maybeLater.ClickAsync();
+
+                await page.WaitForTimeoutAsync(1500);
+                _logger.LogInformation("Target reauth modal handled");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Target reauth modal handling error — continuing");
+            }
+        }
+
         private async Task<bool> LoginTargetAsync(IPage page, SiteAccount account, CancellationToken ct)
         {
             _logger.LogInformation("Playwright: logging into Target as {Email}", account.Email);
-            await page.GotoAsync("https://www.target.com/account/login", new PageGotoOptions { Timeout = 30000 });
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            await page.GotoAsync("https://www.target.com/account/login",
+                new PageGotoOptions { Timeout = 30000, WaitUntil = WaitUntilState.DOMContentLoaded });
+
+            await page.WaitForTimeoutAsync(2000);
+
+            // ?? Already logged in? ????????????????????????????????????????
+            // If the persistent profile has a valid session, Target redirects
+            // straight to /account — no need to go through the login flow.
+            if (!page.Url.Contains("/login") && !page.Url.Contains("create_session"))
+            {
+                _logger.LogInformation("Target: already logged in via persistent session — URL: {Url}", page.Url);
+                return true;
+            }
 
             await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
 
-            await page.FillAsync("#username", account.Email);
-            await page.FillAsync("#password", account.Password);
-            await page.ClickAsync("button[type='submit'], button:has-text('Sign in')");
-
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            await page.WaitForTimeoutAsync(3000);
-
-            // Check for OTP page
-            var otpField = page.Locator("input[name='code'], input[placeholder*='code']").First;
-            if (await otpField.IsVisibleAsync())
+            // ?? Step 1: Enter email ???????????????????????????????????????
+            try
             {
-                _logger.LogInformation("Target OTP page detected");
-                if (_captcha.IsConfigured)
-                    await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
-
-                // Wait for user or email code — if IMAP configured it would be handled
-                // by TargetLoginService before we even hit this path; this is a fallback
-                await page.WaitForTimeoutAsync(30000);
+                await page.WaitForSelectorAsync(
+                    "input[id='username'], input[type='email'], input[autocomplete='email']",
+                    new PageWaitForSelectorOptions { Timeout = 15000 });
+            }
+            catch
+            {
+                _logger.LogWarning("Target login: email field not found");
+                return false;
             }
 
-            var currentUrl = page.Url;
-            var success = currentUrl.Contains("target.com") && !currentUrl.Contains("/login");
-            _logger.LogInformation("Target Playwright login {Status}", success ? "succeeded" : "failed");
+            var emailInput = page.Locator("input[id='username'], input[type='email'], input[autocomplete='email']").First;
+            await emailInput.FillAsync(account.Email);
+
+            var continueBtn = page.Locator("button[type='submit'], button:has-text('Continue'), button:has-text('Next')").First;
+            await continueBtn.ClickAsync();
+            await page.WaitForTimeoutAsync(2500);
+
+            // ?? Step 2: Method selection screen ??????????????????????????
+            // Target shows "Use a passkey / Enter your password / Get a code"
+            // Click "Enter your password" — could be any element type (div, li, button, a)
+            try
+            {
+                await page.WaitForTimeoutAsync(1500);
+
+                // Try GetByText first — matches any element regardless of tag
+                var enterPwByText = page.GetByText("Enter your password", new() { Exact = true });
+                if (await enterPwByText.IsVisibleAsync())
+                {
+                    _logger.LogInformation("Target: clicking 'Enter your password'");
+                    await enterPwByText.ClickAsync();
+                    await page.WaitForTimeoutAsync(2000);
+                }
+                else
+                {
+                    // Fallback: any clickable element containing the text
+                    var enterPwFallback = page.Locator("*:has-text('Enter your password')").Last;
+                    if (await enterPwFallback.IsVisibleAsync())
+                    {
+                        await enterPwFallback.ClickAsync();
+                        await page.WaitForTimeoutAsync(2000);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Target: method selection click failed — continuing");
+            }
+
+            // ?? Step 3: Enter password ????????????????????????????????????
+            try
+            {
+                await page.WaitForSelectorAsync(
+                    "input[type='password'], input[id='password'], input[autocomplete='current-password']",
+                    new PageWaitForSelectorOptions { Timeout = 15000 });
+            }
+            catch
+            {
+                _logger.LogWarning("Target login: password field did not appear");
+                return false;
+            }
+
+            var passwordInput = page.Locator("input[type='password'], input[id='password'], input[autocomplete='current-password']").First;
+            await passwordInput.FillAsync(account.Password);
+
+            // Check "Keep me signed in" to persist the session
+            try
+            {
+                var keepSignedIn = page.Locator("input[type='checkbox'][id*='keep'], input[type='checkbox'][name*='keep'], label:has-text('Keep me signed in')").First;
+                if (await keepSignedIn.IsVisibleAsync())
+                    await keepSignedIn.CheckAsync();
+            }
+            catch { }
+
+            await SolveCaptchaIfPresentAsync(page, "target.com", TargetRecaptchaSiteKey, ct);
+
+            var signInBtn = page.Locator("button:has-text('Sign in with password'), button[type='submit'], button:has-text('Sign in')").First;
+            await signInBtn.ClickAsync();
+
+            // Wait — Target loads "Still loading..." then Circle upsell or account page
+            await page.WaitForTimeoutAsync(5000);
+
+            // ?? Step 4: Dismiss "Still loading..." overlay if present ?????
+            try
+            {
+                await page.WaitForSelectorAsync(
+                    "text=Still loading",
+                    new PageWaitForSelectorOptions { Timeout = 5000, State = WaitForSelectorState.Hidden });
+            }
+            catch { /* overlay may not appear or already gone */ }
+
+            // ?? Step 5: Dismiss Target Circle join prompt ?????????????????
+            try
+            {
+                var dontJoin   = page.GetByText("Don't join", new() { Exact = true });
+                var maybeLater = page.GetByText("Maybe later", new() { Exact = true });
+
+                if (await dontJoin.IsVisibleAsync())
+                {
+                    _logger.LogInformation("Target Circle prompt — clicking 'Don't join'");
+                    await dontJoin.ClickAsync();
+                    await page.WaitForTimeoutAsync(2000);
+                }
+                else if (await maybeLater.IsVisibleAsync())
+                {
+                    _logger.LogInformation("Target Circle prompt — clicking 'Maybe later'");
+                    await maybeLater.ClickAsync();
+                    await page.WaitForTimeoutAsync(2000);
+                }
+            }
+            catch { }
+
+            // ?? Step 5: Handle OTP if prompted ????????????????????????????
+            var otpInput = page.Locator("input[name='code'], input[autocomplete='one-time-code']").First;
+            if (await otpInput.IsVisibleAsync())
+            {
+                _logger.LogInformation("Target OTP challenge detected");
+
+                if (account.UseEmailVerification)
+                {
+                    _logger.LogInformation("Waiting up to 60s for OTP (IMAP auto-fetch not in Playwright path)");
+                    await page.WaitForTimeoutAsync(60000);
+                }
+                else
+                {
+                    _logger.LogInformation("Waiting 60s for manual OTP entry in browser window");
+                    await page.WaitForTimeoutAsync(60000);
+                }
+
+                var otpSubmit = page.Locator("button[type='submit'], button:has-text('Verify'), button:has-text('Continue')").First;
+                if (await otpSubmit.IsVisibleAsync())
+                    await otpSubmit.ClickAsync();
+
+                await page.WaitForTimeoutAsync(3000);
+            }
+
+            var finalUrl = page.Url;
+
+            // The Circle upsell page, account page, or any target.com page that
+            // isn't the username-entry step all count as successful login.
+            // The initial email step URL contains "create_session_request_username".
+            var stillOnEmailStep = finalUrl.Contains("create_session_request_username");
+            var success = finalUrl.Contains("target.com") && !stillOnEmailStep;
+
+            _logger.LogInformation("Target Playwright login {Status} — URL: {Url}",
+                success ? "succeeded" : "failed", finalUrl);
             return success;
         }
 
@@ -292,16 +562,79 @@ namespace MonitorBot.Infrastructure.Browser
         {
             var pay = profile.Payment;
 
-            var cardNumber = page.Locator("input[name='cardNumber'], input[placeholder*='Card number']").First;
-            if (await cardNumber.IsVisibleAsync()) await cardNumber.FillAsync(pay.CardNumber);
+            // ?? Check if card is already saved ????????????????????????????
+            // If a saved card is already selected, just click Save and continue
+            var savedCard = page.Locator("[data-test='saved-payment'], input[type='radio'][value*='card']:checked").First;
+            var cardAlreadySaved = await savedCard.IsVisibleAsync();
 
-            var expiry = page.Locator("input[name='expiry'], input[placeholder*='MM/YY']").First;
-            if (await expiry.IsVisibleAsync()) await expiry.FillAsync($"{pay.ExpiryMonth}/{pay.ExpiryYear}");
+            if (!cardAlreadySaved)
+            {
+                // ?? Select "Credit or debit card" radio button ?????????????
+                var creditRadio = page.Locator("input[type='radio'] + label:has-text('Credit or debit card'), " +
+                                               "label:has-text('Credit or debit card')").First;
+                if (await creditRadio.IsVisibleAsync())
+                {
+                    await creditRadio.ClickAsync();
+                    await page.WaitForTimeoutAsync(1500);
+                }
+                else
+                {
+                    // Try clicking the radio button directly next to the label
+                    var creditRadioDirect = page.Locator("input[type='radio'][value*='credit'], input[type='radio'][id*='credit']").First;
+                    if (await creditRadioDirect.IsVisibleAsync())
+                    {
+                        await creditRadioDirect.ClickAsync();
+                        await page.WaitForTimeoutAsync(1500);
+                    }
+                    else
+                    {
+                        // Last resort — click the row that contains the text
+                        var creditRow = page.GetByText("Credit or debit card").First;
+                        if (await creditRow.IsVisibleAsync())
+                        {
+                            await creditRow.ClickAsync();
+                            await page.WaitForTimeoutAsync(1500);
+                        }
+                    }
+                }
 
-            var cvv = page.Locator("input[name='cvv'], input[placeholder*='CVV']").First;
-            if (await cvv.IsVisibleAsync()) await cvv.FillAsync(pay.Cvv);
+                // ?? Fill card number ???????????????????????????????????????
+                var cardNumber = page.Locator("input[name='cardNumber'], input[id*='cardNumber'], input[placeholder*='Card number'], input[autocomplete='cc-number']").First;
+                if (await cardNumber.IsVisibleAsync())
+                    await cardNumber.FillAsync(pay.CardNumber);
 
-            var saveBtn = page.Locator("button:has-text('Save'), button:has-text('Continue')").First;
+                await page.WaitForTimeoutAsync(500);
+
+                // ?? Fill expiry ????????????????????????????????????????????
+                // Try combined MM/YY field first, then separate month/year fields
+                var expiryCombined = page.Locator("input[name='expiry'], input[placeholder*='MM/YY'], input[autocomplete='cc-exp']").First;
+                if (await expiryCombined.IsVisibleAsync())
+                {
+                    await expiryCombined.FillAsync($"{pay.ExpiryMonth}/{pay.ExpiryYear}");
+                }
+                else
+                {
+                    var expMonth = page.Locator("select[name='expirationMonth'], input[name='expiryMonth']").First;
+                    if (await expMonth.IsVisibleAsync()) await expMonth.FillAsync(pay.ExpiryMonth);
+
+                    var expYear = page.Locator("select[name='expirationYear'], input[name='expiryYear']").First;
+                    if (await expYear.IsVisibleAsync()) await expYear.FillAsync(pay.ExpiryYear);
+                }
+
+                // ?? Fill CVV ???????????????????????????????????????????????
+                var cvv = page.Locator("input[name='cvv'], input[id*='cvv'], input[autocomplete='cc-csc'], input[placeholder*='CVV'], input[placeholder*='CVC']").First;
+                if (await cvv.IsVisibleAsync())
+                    await cvv.FillAsync(pay.Cvv);
+
+                await page.WaitForTimeoutAsync(500);
+            }
+            else
+            {
+                _logger.LogInformation("Target: saved card already selected, skipping card entry");
+            }
+
+            // ?? Click Save and continue ????????????????????????????????????
+            var saveBtn = page.Locator("button:has-text('Save and continue'), button:has-text('Save & continue'), button:has-text('Continue')").First;
             if (await saveBtn.IsVisibleAsync())
                 await saveBtn.ClickAsync();
 
@@ -410,28 +743,91 @@ namespace MonitorBot.Infrastructure.Browser
         private async Task<bool> LoginWalmartAsync(IPage page, SiteAccount account, CancellationToken ct)
         {
             _logger.LogInformation("Playwright: logging into Walmart as {Email}", account.Email);
-            await page.GotoAsync("https://www.walmart.com/account/login", new PageGotoOptions { Timeout = 30000 });
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            await page.GotoAsync("https://www.walmart.com/account/login",
+                new PageGotoOptions { Timeout = 30000, WaitUntil = WaitUntilState.DOMContentLoaded });
+
+            await page.WaitForTimeoutAsync(2000);
+
+            // ?? Already logged in? ????????????????????????????????????????
+            if (!page.Url.Contains("/login"))
+            {
+                _logger.LogInformation("Walmart: already logged in via persistent session — URL: {Url}", page.Url);
+                return true;
+            }
 
             await SolveCaptchaIfPresentAsync(page, "walmart.com", WalmartRecaptchaSiteKey, ct);
 
-            await page.FillAsync("input[name='email']", account.Email);
-            await page.ClickAsync("button:has-text('Continue'), button[type='submit']");
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            // Dismiss passkey / "Use password instead" prompt if present
+            await DismissPasskeyPromptAsync(page);
 
-            var passwordField = page.Locator("input[name='password']").First;
-            if (await passwordField.IsVisibleAsync())
-                await passwordField.FillAsync(account.Password);
+            // ?? Step 1: Email ?????????????????????????????????????????????
+            try
+            {
+                await page.WaitForSelectorAsync(
+                    "input[name='email'], input[type='email'], input[autocomplete='email']",
+                    new PageWaitForSelectorOptions { Timeout = 15000 });
+            }
+            catch
+            {
+                _logger.LogWarning("Walmart login: email field not found");
+                return false;
+            }
 
-            await page.ClickAsync("button[type='submit'], button:has-text('Sign in')");
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            await page.WaitForTimeoutAsync(3000);
+            var emailInput = page.Locator("input[name='email'], input[type='email'], input[autocomplete='email']").First;
+            await emailInput.FillAsync(account.Email);
+
+            var continueBtn = page.Locator("button:has-text('Continue'), button[type='submit']").First;
+            await continueBtn.ClickAsync();
+            await page.WaitForTimeoutAsync(2000);
+
+            // ?? Step 2: Password ??????????????????????????????????????????
+            try
+            {
+                await page.WaitForSelectorAsync(
+                    "input[type='password'], input[name='password'], input[autocomplete='current-password']",
+                    new PageWaitForSelectorOptions { Timeout = 15000 });
+            }
+            catch
+            {
+                _logger.LogWarning("Walmart login: password field did not appear");
+                return false;
+            }
+
+            var passwordInput = page.Locator("input[type='password'], input[name='password']").First;
+            await passwordInput.FillAsync(account.Password);
 
             await SolveCaptchaIfPresentAsync(page, "walmart.com", WalmartRecaptchaSiteKey, ct);
 
-            var currentUrl = page.Url;
-            var success = currentUrl.Contains("walmart.com") && !currentUrl.Contains("/login");
-            _logger.LogInformation("Walmart Playwright login {Status}", success ? "succeeded" : "failed");
+            var signInBtn = page.Locator("button:has-text('Sign in with password'), button[type='submit'], button:has-text('Sign in')").First;
+            await signInBtn.ClickAsync();
+
+            try
+            {
+                await page.WaitForURLAsync(url => !url.Contains("/login"), new PageWaitForURLOptions { Timeout = 15000 });
+            }
+            catch { }
+
+            await page.WaitForTimeoutAsync(2000);
+
+            // ?? Step 3: OTP if prompted ???????????????????????????????????
+            var otpInput = page.Locator("input[name='code'], input[autocomplete='one-time-code'], input[placeholder*='code']").First;
+            if (await otpInput.IsVisibleAsync())
+            {
+                _logger.LogInformation("Walmart OTP challenge detected — waiting 60s for code");
+                await page.WaitForTimeoutAsync(60000);
+
+                var otpSubmit = page.Locator("button[type='submit'], button:has-text('Verify'), button:has-text('Continue')").First;
+                if (await otpSubmit.IsVisibleAsync())
+                    await otpSubmit.ClickAsync();
+
+                await page.WaitForTimeoutAsync(3000);
+            }
+
+            var finalUrl = page.Url;
+            var success  = finalUrl.Contains("walmart.com") && !finalUrl.Contains("/login");
+            _logger.LogInformation("Walmart Playwright login {Status} — URL: {Url}",
+                success ? "succeeded" : "failed", finalUrl);
             return success;
         }
 
@@ -506,6 +902,36 @@ namespace MonitorBot.Infrastructure.Browser
                 return m.Success ? m.Groups[1].Value : null;
             }
             catch { return null; }
+        }
+
+        // ?? PASSKEY PROMPT DISMISSAL ?????????????????????????????????????????
+        // Target and Walmart show a "Use passkey or password?" modal on login pages.
+        // We always want password — click the appropriate link to dismiss it.
+        private static async Task DismissPasskeyPromptAsync(IPage page)
+        {
+            try
+            {
+                // Give the prompt up to 3 seconds to appear
+                await page.WaitForTimeoutAsync(1500);
+
+                // Common selectors for "Use password instead" / "Sign in a different way" links
+                var usePassword = page.Locator(
+                    "button:has-text('Use password'), " +
+                    "button:has-text('Use a password'), " +
+                    "a:has-text('Use password'), " +
+                    "button:has-text('Sign in a different way'), " +
+                    "button:has-text('More options'), " +
+                    "[data-test='use-password-link'], " +
+                    "button:has-text('Cancel')").First;
+
+                if (await usePassword.IsVisibleAsync())
+                    await usePassword.ClickAsync();
+
+                // Also handle browser-level credential dialogs by pressing Escape
+                await page.Keyboard.PressAsync("Escape");
+                await page.WaitForTimeoutAsync(500);
+            }
+            catch { /* prompt may not appear — that's fine */ }
         }
 
         // ?? CAPTCHA ??????????????????????????????????????????????????????????

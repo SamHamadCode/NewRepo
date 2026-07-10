@@ -6,6 +6,7 @@ using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MonitorBot.App.ViewModels;
+using MonitorBot.App.Views;
 using MonitorBot.Core.Interfaces;
 using MonitorBot.Infrastructure.Browser;
 using MonitorBot.Infrastructure.Captcha;
@@ -69,6 +70,7 @@ namespace MonitorBot.App
             services.AddSingleton<IAccountRepository>(_ => new AccountRepository(dataDir));
             services.AddSingleton<IProxyRepository>(_ => new ProxyRepository(dataDir));
             services.AddSingleton<IProductChecker, HttpProductChecker>();
+            services.AddSingleton<PlaywrightStockChecker>();
             services.AddSingleton<EmailVerificationService>();
             services.AddSingleton<CaptchaSolverService>();
             services.AddSingleton<TargetLoginService>();
@@ -126,10 +128,12 @@ namespace MonitorBot.App
 
         private static void ShowToast(string title, string message)
         {
-            // Strip emoji/non-ASCII so MessageBox title renders correctly
-            var cleanTitle = System.Text.RegularExpressions.Regex.Replace(title, @"[^\u0000-\u007F\s]", "").Trim();
-            Current.Dispatcher.Invoke(() =>
-                MessageBox.Show(message, cleanTitle, MessageBoxButton.OK, MessageBoxImage.Information));
+            // Non-blocking — runs on UI thread but does not pause the monitoring loop
+            Current.Dispatcher.InvokeAsync(() =>
+            {
+                var toast = new ToastWindow(title, message);
+                toast.Show();
+            });
         }
     }
 }
