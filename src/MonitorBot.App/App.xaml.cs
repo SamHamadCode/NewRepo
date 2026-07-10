@@ -26,8 +26,23 @@ namespace MonitorBot.App
 
         protected override async void OnStartup(StartupEventArgs e)
         {
+            // Catch any unhandled exception and show a message box before crashing
+            AppDomain.CurrentDomain.UnhandledException += (s, ex) =>
+            {
+                var msg = ex.ExceptionObject?.ToString() ?? "Unknown error";
+                MessageBox.Show(msg, "MonitorBot — Startup Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            };
+            DispatcherUnhandledException += (s, ex) =>
+            {
+                MessageBox.Show(ex.Exception?.ToString() ?? "Unknown error",
+                    "MonitorBot — UI Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                ex.Handled = true;
+            };
+
             base.OnStartup(e);
 
+            try
+            {
             var dataDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "MonitorBot");
@@ -114,6 +129,13 @@ namespace MonitorBot.App
 
             var window = _services.GetRequiredService<MainWindow>();
             window.Show();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString(), "MonitorBot — Failed to Start",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown(1);
+            }
         }
 
         protected override async void OnExit(ExitEventArgs e)
