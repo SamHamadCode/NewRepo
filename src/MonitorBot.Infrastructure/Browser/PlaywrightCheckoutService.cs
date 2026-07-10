@@ -95,10 +95,21 @@ namespace MonitorBot.Infrastructure.Browser
                 // Each account gets its own profile so sessions don't conflict.
                 var profileDir = GetProfileDir(account);
 
+                // Prefer the user's real Chrome install — much harder to fingerprint than bundled Chromium
+                var chromePaths = new[]
+                {
+                    @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        @"Google\Chrome\Application\chrome.exe")
+                };
+                var realChrome = chromePaths.FirstOrDefault(File.Exists);
+
                 context = await playwright.Chromium.LaunchPersistentContextAsync(profileDir,
                     new BrowserTypeLaunchPersistentContextOptions
                     {
                         Headless = _settings.Current.HeadlessBrowser,
+                        ExecutablePath = realChrome, // null = use bundled Chromium as fallback
                         UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                                     "AppleWebKit/537.36 (KHTML, like Gecko) " +
                                     "Chrome/124.0.0.0 Safari/537.36",
@@ -110,20 +121,49 @@ namespace MonitorBot.Infrastructure.Browser
                             "--no-sandbox",
                             "--disable-blink-features=AutomationControlled",
                             "--disable-dev-shm-usage",
-                            "--disable-features=IsolateOrigins,site-per-process"
+                            "--disable-features=IsolateOrigins,site-per-process",
+                            "--disable-infobars",
+                            "--password-store=basic",
+                            "--use-mock-keychain"
                         },
                         ExtraHTTPHeaders = new System.Collections.Generic.Dictionary<string, string>
                         {
                             ["Accept-Language"] = "en-US,en;q=0.9"
-                        }
+                        },
+                        IgnoreDefaultArgs = new[] { "--enable-automation", "--enable-blink-features=IdleDetection" }
                     });
 
                 // Patch navigator.webdriver on every page in this context
                 await context.AddInitScriptAsync(@"
-                    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                    Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+                    // Hide webdriver flag
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+                    // Fake plugin list like a real browser
+                    Object.defineProperty(navigator, 'plugins', { get: () => {
+                        return [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                        ];
+                    }});
+
+                    // Real language list
                     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                    window.chrome = { runtime: {} };
+
+                    // Spoof chrome runtime so sites see it as a real Chrome
+                    window.chrome = {
+                        app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+                        runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} },
+                        loadTimes: function() {},
+                        csi: function() {}
+                    };
+
+                    // Permissions API — real Chrome returns 'granted' for notifications
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) =>
+                        parameters.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : originalQuery(parameters);
                 ");
 
                 var page = await context.NewPageAsync();
@@ -250,7 +290,10 @@ namespace MonitorBot.Infrastructure.Browser
 
             await placeOrder.ClickAsync();
 
-            // Wait for Target's confirmation page — it navigates to /order-confirmation/{id}
+            // Handle CVV confirmation modal that Target may show after clicking Place your order
+            await HandleTargetCvvModalAsync(page, profile);
+
+            // Wait for Target's confirmation page
             // Can take up to 30s depending on payment processing
             try
             {
@@ -295,6 +338,66 @@ namespace MonitorBot.Infrastructure.Browser
         }
 
         /// <summary>
+        /// Tries each CSS selector in order and clicks the first one that is visible.
+        /// Returns true if a button was clicked, false if none matched.
+        /// </summary>
+        private static async Task<bool> TryClickFirstVisibleAsync(IPage page, params string[] selectors)
+        {
+            foreach (var selector in selectors)
+            {
+                try
+                {
+                    var el = page.Locator(selector).First;
+                    if (await el.IsVisibleAsync())
+                    {
+                        await el.ClickAsync();
+                        return true;
+                    }
+                }
+                catch { /* selector may not exist — try next */ }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Handles the "Confirm CVV" modal Target shows when placing an order with a saved card.
+        /// Enters the CVV from the user's profile and clicks Confirm.
+        /// </summary>
+        private async Task HandleTargetCvvModalAsync(IPage page, UserProfile profile)
+        {
+            try
+            {
+                // Wait briefly to see if the CVV modal appears
+                await page.WaitForTimeoutAsync(2000);
+
+                var cvvInput = page.Locator("input[id*='cvv'], input[placeholder*='CVV'], input[placeholder*='cvv'], input[aria-label*='CVV'], input[aria-label*='cvv']").First;
+                if (!await cvvInput.IsVisibleAsync())
+                    return; // No CVV modal — proceed normally
+
+                _logger.LogInformation("CVV confirmation modal detected — entering CVV");
+
+                if (string.IsNullOrWhiteSpace(profile.Payment.Cvv))
+                {
+                    _logger.LogWarning("CVV not set in profile — cannot confirm CVV modal");
+                    return;
+                }
+
+                await cvvInput.ClickAsync();
+                await cvvInput.FillAsync(profile.Payment.Cvv);
+                await page.WaitForTimeoutAsync(500);
+
+                // Click the Confirm button
+                var confirmBtn = page.Locator("button:has-text('Confirm')").First;
+                if (await confirmBtn.IsVisibleAsync())
+                    await confirmBtn.ClickAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CVV modal handling failed — continuing anyway");
+            }
+        }
+
+        /// <summary>
         /// Handles the inline re-authentication modal Target shows on cart/checkout pages.
         /// It appears as a slide-in panel with "Enter your password" option.
         /// </summary>
@@ -322,13 +425,51 @@ namespace MonitorBot.Infrastructure.Browser
 
                 await page.WaitForTimeoutAsync(1500);
 
-                // Fill password
+                // Fill password with human-like typing to avoid bot detection
                 var passwordInput = page.Locator("input[type='password'], input[autocomplete='current-password']").First;
                 if (await passwordInput.IsVisibleAsync())
                 {
-                    await passwordInput.FillAsync(account.Password);
-                    // Press Enter — more reliable than clicking the button inside the modal
-                    await passwordInput.PressAsync("Enter");
+                    await passwordInput.ClickAsync();
+                    await page.WaitForTimeoutAsync(400);
+                    await passwordInput.TypeAsync(account.Password, new LocatorTypeOptions { Delay = 90 });
+                    await page.WaitForTimeoutAsync(600);
+
+                    // Try multiple selectors for the sign-in submit button in the reauth modal
+                    var signInBtn =
+                        await TryClickFirstVisibleAsync(page,
+                            "button:has-text('Sign in with password')",
+                            "button:has-text('Sign In with password')",
+                            "button:has-text('Sign in')",
+                            "button[type='submit']");
+
+                    if (!signInBtn)
+                        await passwordInput.PressAsync("Enter");
+
+                    // If Target shows "Something went wrong" banner, wait and retry once
+                    await page.WaitForTimeoutAsync(2000);
+                    var errorBanner = page.Locator("text='Something went wrong on our end'").First;
+                    if (await errorBanner.IsVisibleAsync())
+                    {
+                        _logger.LogWarning("Target reauth: 'Something went wrong' — waiting 4s and retrying");
+                        await page.WaitForTimeoutAsync(4000);
+                        // Clear and retype password
+                        var pwRetry = page.Locator("input[type='password'], input[autocomplete='current-password']").First;
+                        if (await pwRetry.IsVisibleAsync())
+                        {
+                            await pwRetry.ClickAsync();
+                            await page.Keyboard.PressAsync("Control+A");
+                            await page.WaitForTimeoutAsync(200);
+                            await pwRetry.TypeAsync(account.Password, new LocatorTypeOptions { Delay = 110 });
+                            await page.WaitForTimeoutAsync(700);
+                            var retried = await TryClickFirstVisibleAsync(page,
+                                "button:has-text('Sign in with password')",
+                                "button:has-text('Sign In with password')",
+                                "button:has-text('Sign in')",
+                                "button[type='submit']");
+                            if (!retried)
+                                await pwRetry.PressAsync("Enter");
+                        }
+                    }
                 }
 
                 await page.WaitForTimeoutAsync(3000);
@@ -384,7 +525,9 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             var emailInput = page.Locator("input[id='username'], input[type='email'], input[autocomplete='email']").First;
-            await emailInput.FillAsync(account.Email);
+            await emailInput.ClickAsync();
+            await page.WaitForTimeoutAsync(300);
+            await emailInput.TypeAsync(account.Email, new LocatorTypeOptions { Delay = 75 });
 
             var continueBtn = page.Locator("button[type='submit'], button:has-text('Continue'), button:has-text('Next')").First;
             await continueBtn.ClickAsync();
@@ -435,7 +578,9 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             var passwordInput = page.Locator("input[type='password'], input[id='password'], input[autocomplete='current-password']").First;
-            await passwordInput.FillAsync(account.Password);
+            await passwordInput.ClickAsync();
+            await page.WaitForTimeoutAsync(300);
+            await passwordInput.TypeAsync(account.Password, new LocatorTypeOptions { Delay = 80 });
 
             // Check "Keep me signed in" to persist the session
             try
