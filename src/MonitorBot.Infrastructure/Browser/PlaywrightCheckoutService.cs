@@ -850,14 +850,19 @@ namespace MonitorBot.Infrastructure.Browser
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
             await SolveCaptchaIfPresentAsync(page, "walmart.com", WalmartRecaptchaSiteKey, ct);
 
-            // Fill shipping
-            await FillWalmartShippingAsync(page, profile, account);
-
-            // Fill payment
-            await FillWalmartPaymentAsync(page, profile);
-
-            // Place order
+            // If Walmart checkout is already pre-filled (saved payment), skip straight to place order
             var placeOrder = page.Locator("button:has-text('Place order'), button:has-text('Review your order')").First;
+            if (!await placeOrder.IsVisibleAsync())
+            {
+                // Fill shipping
+                await FillWalmartShippingAsync(page, profile, account);
+
+                // Fill payment
+                await FillWalmartPaymentAsync(page, profile);
+            }
+
+            // Re-locate after possible page changes
+            placeOrder = page.Locator("button:has-text('Place order'), button:has-text('Review your order')").First;
             if (!await placeOrder.IsVisibleAsync())
             {
                 result.Status = CheckoutStatus.Failed;
@@ -866,6 +871,20 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             await placeOrder.ClickAsync();
+
+            // Wait up to 30s for Walmart's order confirmation page
+            try
+            {
+                await page.WaitForURLAsync(
+                    url => url.Contains("thank-you") || url.Contains("order-confirmation") || url.Contains("/account/order/"),
+                    new PageWaitForURLOptions { Timeout = 30000 });
+            }
+            catch
+            {
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForTimeoutAsync(5000);
+            }
+
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
             var orderId = await ExtractWalmartOrderIdAsync(page);
@@ -920,7 +939,9 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             var emailInput = page.Locator("input[name='email'], input[type='email'], input[autocomplete='email']").First;
-            await emailInput.FillAsync(account.Email);
+            await emailInput.ClickAsync();
+            await page.WaitForTimeoutAsync(300);
+            await emailInput.TypeAsync(account.Email, new LocatorTypeOptions { Delay = 75 });
 
             var continueBtn = page.Locator("button:has-text('Continue'), button[type='submit']").First;
             await continueBtn.ClickAsync();
@@ -940,7 +961,9 @@ namespace MonitorBot.Infrastructure.Browser
             }
 
             var passwordInput = page.Locator("input[type='password'], input[name='password']").First;
-            await passwordInput.FillAsync(account.Password);
+            await passwordInput.ClickAsync();
+            await page.WaitForTimeoutAsync(300);
+            await passwordInput.TypeAsync(account.Password, new LocatorTypeOptions { Delay = 80 });
 
             await SolveCaptchaIfPresentAsync(page, "walmart.com", WalmartRecaptchaSiteKey, ct);
 
