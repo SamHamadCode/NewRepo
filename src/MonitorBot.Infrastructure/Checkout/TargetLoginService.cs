@@ -12,6 +12,7 @@ using Newtonsoft.Json.Linq;
 
 namespace MonitorBot.Infrastructure.Checkout
 {
+    //
     public class TargetLoginService : IAccountLoginService
     {
         private readonly ILogger<TargetLoginService> _logger;
