@@ -17,6 +17,8 @@
                              Tag="Search logs..." Margin="0,0,8,0"/>
                     <Button Content="Refresh" Style="{StaticResource SecondaryButton}"
                             Command="{Binding RefreshCommand}" Margin="0,0,8,0"/>
+                    <Button Content="Copy Logs" Style="{StaticResource SecondaryButton}"
+                            Command="{Binding CopyCommand}" Margin="0,0,8,0"/>
                     <Button Content="Clear" Style="{StaticResource DangerButton}"
                             Command="{Binding ClearCommand}"/>
                 </StackPanel>

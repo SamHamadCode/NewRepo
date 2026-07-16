@@ -1,4 +1,7 @@
 using System;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -13,32 +16,48 @@ using Newtonsoft.Json.Linq;
 
 namespace MonitorBot.Infrastructure.Checkout
 {
-    /// <summary>
-    /// Target checkout flow � mirrors RefractBot step-by-step:
-    ///   1. LoggingIn    � authenticate with account (if assigned)
-    ///   2. AddingToCart � POST to carts.target.com with exact quantity
-    ///   3. PlacingOrder � POST checkout order with shipping + payment
-    /// </summary>
     public class TargetCheckoutService : ICheckoutService
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<TargetCheckoutService> _logger;
         private readonly TargetLoginService _loginService;
+        private readonly ILogStore _logStore;
+        private readonly ITargetBrowserCheckout? _browserCheckout;
 
         private static readonly Regex TcinRegex = new(
             @"/-/A-(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex TcinAltRegex = new(
             @"[?&]preselect=(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex ApiKeyRegex = new(
+            @"[""']([0-9a-f]{40})[""']", RegexOptions.Compiled);
+
+        // Cached so we only fetch once per app run, refreshed on 401
+        private static string _cachedApiKey = "ff457966e64d5e877fdbad070f276d18ecec4a01";
+        private static DateTime _apiKeyFetchedAt = DateTime.MinValue;
 
         public TargetCheckoutService(
             IHttpClientFactory httpClientFactory,
             ILogger<TargetCheckoutService> logger,
-            TargetLoginService loginService)
+            TargetLoginService loginService,
+            ILogStore logStore,
+            ITargetBrowserCheckout? browserCheckout = null)
         {
             _httpClientFactory = httpClientFactory;
             _logger = logger;
             _loginService = loginService;
+            _logStore = logStore;
+            _browserCheckout = browserCheckout;
         }
+
+        /// <summary>Writes a message directly to the Activity Log UI.</summary>
+        private void Log(string level, string message, string? taskId = null) =>
+            _logStore.Add(new LogEntry
+            {
+                Level    = level,
+                Category = "Checkout",
+                Message  = message,
+                TaskId   = taskId
+            });
 
         public async Task<CheckoutResult> CheckoutAsync(
             MonitorTask task,
@@ -98,11 +117,32 @@ namespace MonitorBot.Infrastructure.Checkout
                     _logger.LogInformation("No account or cookies — proceeding as guest");
                 }
 
-                using var client = BuildClient(sessionCookies, null);
+                // Log which auth path we're taking — visible in Activity Log
+                Log("INFO", string.IsNullOrWhiteSpace(sessionCookies)
+                    ? "[Target] Auth path: GUEST (no account/cookies)"
+                    : "[Target] Auth path: SESSION cookies present");
+
+                // Use whatever token is available in the cookies.
+                // BuildClient extracts accessToken / target_access_token automatically.
+                var mergedCookies = sessionCookies ?? string.Empty;
+
+                if (!string.IsNullOrWhiteSpace(sessionCookies))
+                {
+                    var id2tok = ExtractCookieValue(sessionCookies, "target_access_token");
+                    var mi6tok = ExtractCookieValue(sessionCookies, "accessToken");
+                    if (id2tok != null)
+                        Log("INFO", $"[Target] Using ID2 token (target_access_token, len={id2tok.Length})");
+                    else if (mi6tok != null)
+                        Log("WARN", $"[Target] Only MI6 token found (accessToken, len={mi6tok.Length}) — checkout GET init will fail. Re-harvest with items in cart to get target_access_token.");
+                    else
+                        Log("WARN", "[Target] No auth token found in cookies");
+                }
+
+                using var client = BuildClient(mergedCookies, null);
 
                 // ── Step 2: Add to cart ────────────────────────────────────
                 onStatus?.Invoke(MonitorTaskStatus.AddingToCart);
-                var (atcOk, atcError) = await AddToCartAsync(client, tcin, quantity, sessionCookies, ct);
+                var (atcOk, cartId, atcError) = await AddToCartAsync(client, tcin, quantity, mergedCookies, ct);
                 if (!atcOk)
                 {
                     result.Status       = CheckoutStatus.Failed;
@@ -110,15 +150,30 @@ namespace MonitorBot.Infrastructure.Checkout
                     return result;
                 }
 
-                _logger.LogInformation("Added TCIN {Tcin} �{Qty} to Target cart", tcin, quantity);
+                _logger.LogInformation("Added TCIN {Tcin} x{Qty} to Target cart (cartId={CartId})", tcin, quantity, cartId);
 
-                // ?? Step 3: Place order ????????????????????????????????????
+                // ── Step 3: Place order ────────────────────────────────────
                 onStatus?.Invoke(MonitorTaskStatus.PlacingOrder);
-                var orderId = await PlaceOrderAsync(client, tcin, profile, quantity, ct);
+                string? orderId, orderError;
+                if (_browserCheckout != null)
+                {
+                    // Use embedded browser checkout — the only method that gets a real ID2 token
+                    Log("INFO", "[Target] Using browser checkout (ID2 token path)");
+                    var apiKey = await FetchApiKeyAsync(client, ct);
+                    (orderId, orderError) = await _browserCheckout.RunAsync(
+                        mergedCookies, tcin, quantity, apiKey, cartId!, profile, ct);
+                }
+                else
+                {
+                    Log("WARN", "[Target] Browser checkout not available — falling back to HTTP (may fail)");
+                    (orderId, orderError) = await PlaceOrderAsync(client, cartId!, tcin, profile, quantity, ct);
+                }
                 if (string.IsNullOrEmpty(orderId))
                 {
                     result.Status = CheckoutStatus.CardDeclined;
-                    result.ErrorMessage = "Order submission failed � check card details.";
+                    result.ErrorMessage = string.IsNullOrWhiteSpace(orderError)
+                        ? "Order submission failed — check card details."
+                        : $"CardDeclined: {orderError}";
                     return result;
                 }
 
@@ -142,12 +197,194 @@ namespace MonitorBot.Infrastructure.Checkout
             return result;
         }
 
+        /// <summary>
+        /// Registers a guest identity with Target's auth service and returns the
+        /// Set-Cookie string that must be forwarded on the checkout request.
+        /// Target returns 403 INVALID_GUEST_STATUS without this step for guest checkouts.
+        /// </summary>
+        private async Task<(bool ok, string? cookies, string error)> RegisterGuestAsync(
+            HttpClient client, string cartId, UserProfile profile, CancellationToken ct)
+        {
+            try
+            {
+                // Target's guest registration endpoint — creates an anonymous identity
+                // bound to the current browser session.
+                const string url = "https://guestidentity.target.com/v1/guest/token";
+
+                var payload = new JObject
+                {
+                    ["channel"]    = "WEB",
+                    ["cart_id"]    = cartId,
+                    ["email"]      = profile.Email
+                };
+
+                using var req = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(
+                        payload.ToString(Newtonsoft.Json.Formatting.None),
+                        Encoding.UTF8, "application/json")
+                };
+                req.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+                var resp = await client.SendAsync(req, ct);
+                var body = await resp.Content.ReadAsStringAsync(ct);
+
+                Log("INFO", $"[Target] Guest register HTTP {(int)resp.StatusCode}: {(body.Length > 300 ? body[..300] : body)}");
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    // Collect Set-Cookie headers to forward
+                    var setCookies = string.Join("; ",
+                        resp.Headers.TryGetValues("Set-Cookie", out var vals)
+                            ? System.Linq.Enumerable.Select(vals, v => v.Split(';')[0])
+                            : System.Array.Empty<string>());
+                    return (true, setCookies.Length > 0 ? setCookies : null, string.Empty);
+                }
+
+                // Non-2xx — parse error but don't hard-fail; PlaceOrder may still work
+                // if the cart already has a valid session attached
+                string err;
+                try { err = JObject.Parse(body)["message"]?.ToString() ?? body; }
+                catch { err = body; }
+                Log("WARN", $"[Target] Guest register failed (non-fatal): {err}");
+                return (true, null, string.Empty); // soft-fail: let PlaceOrder try anyway
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Guest registration request failed");
+                return (true, null, string.Empty); // soft-fail
+            }
+        }
+
+        /// <summary>
+        /// Builds an HttpClient that uses a live CookieContainer so Target
+        /// can set visitorId / session cookies automatically via Set-Cookie.
+        /// Returns both the client and the container so cookies can be read back.
+        /// </summary>
+        private (HttpClient client, CookieContainer jar) BuildCookieClient()
+        {
+            var jar = new CookieContainer();
+            var handler = new HttpClientHandler
+            {
+                AutomaticDecompression = DecompressionMethods.GZip
+                                       | DecompressionMethods.Deflate
+                                       | DecompressionMethods.Brotli,
+                AllowAutoRedirect  = true,
+                UseCookies         = true,
+                CookieContainer    = jar
+            };
+            var client = new HttpClient(handler);
+            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            return (client, jar);
+        }
+
+        /// <summary>
+        /// Visits target.com so the server sets visitorId + session cookies
+        /// into our CookieContainer, which Target requires for guest checkout.
+        /// </summary>
+        private async Task BootstrapSessionAsync(
+            HttpClient client, CancellationToken ct)
+        {
+            try
+            {
+                await client.GetAsync("https://www.target.com", ct);
+                Log("INFO", "[Target] Session bootstrap complete (visitorId set)");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Target session bootstrap failed (non-fatal)");
+            }
+        }
+
+        /// <summary>
+        /// Fetches a guest Bearer token from Target's auth service.
+        /// This is required on every guest checkout — without it the checkout
+        /// endpoint returns 403 INVALID_GUEST_STATUS.
+        /// Mirrors exactly what TargetLoginService does in its Step 1.
+        /// </summary>
+        /// <summary>
+        /// GETs the checkout endpoint to initialise a guest session against the cart.
+        /// Target's server registers the Bearer token identity with the cart during this
+        /// call. Without it, the subsequent checkout POST returns 403 INVALID_GUEST_STATUS.
+        /// </summary>
+        private async Task InitCheckoutSessionAsync(
+            HttpClient client, string cartId, CancellationToken ct)
+        {
+            try
+            {
+                var apiKey = await FetchApiKeyAsync(client, ct);
+                var url = $"https://carts.target.com/web_checkouts/v1/checkout" +
+                          $"?cart_id={cartId}&field_groups=CHECKOUT%2CCART&key={apiKey}";
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+                var resp = await client.SendAsync(req, ct);
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                Log("INFO", $"[Target] Init checkout session HTTP {(int)resp.StatusCode}: " +
+                            $"{(body.Length > 200 ? body[..200] : body)}");
+            }
+            catch (Exception ex)
+            {
+                // Non-fatal — log and let PlaceOrder try anyway
+                _logger.LogWarning(ex, "InitCheckoutSessionAsync failed");
+                Log("WARN", $"[Target] Init checkout session failed (non-fatal): {ex.Message}");
+            }
+        }
+
+        private async Task<(bool ok, string? token, string error)> FetchGuestTokenAsync(
+            string? existingCookies, CancellationToken ct)
+        {
+            var (token, status, body) = await _loginService.GetGuestTokenAsync(existingCookies, ct);
+            Log(string.IsNullOrEmpty(token) ? "WARN" : "INFO",
+                $"[Target] gsp.target.com HTTP {status}: {(body.Length > 400 ? body[..400] : body)}");
+            if (string.IsNullOrEmpty(token))
+                return (false, null, $"Guest token failed: HTTP {status} — {(body.Length > 200 ? body[..200] : body)}");
+            return (true, token, string.Empty);
+        }
+
         private static string? ExtractTcin(string url)
         {
             var m = TcinRegex.Match(url);
             if (m.Success) return m.Groups[1].Value;
             m = TcinAltRegex.Match(url);
             return m.Success ? m.Groups[1].Value : null;
+        }
+
+        /// <summary>
+        /// Fetches the current Target API key from their web app bundle.
+        /// The key is a 40-char hex string embedded in Target's JS.
+        /// Falls back to the cached value if the fetch fails.
+        /// </summary>
+        private async Task<string> FetchApiKeyAsync(HttpClient client, CancellationToken ct)
+        {
+            // Refresh at most once per hour
+            if ((DateTime.UtcNow - _apiKeyFetchedAt).TotalMinutes < 5)
+                return _cachedApiKey;
+
+            try
+            {
+                // Target embeds the API key in their main page config script
+                var html = await client.GetStringAsync("https://www.target.com", ct);
+                var match = ApiKeyRegex.Match(html);
+                if (match.Success)
+                {
+                    _cachedApiKey = match.Groups[1].Value;
+                    _apiKeyFetchedAt = DateTime.UtcNow;
+                    _logger.LogInformation("Target API key refreshed: {Key}", _cachedApiKey);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not refresh Target API key, using cached value");
+            }
+
+            return _cachedApiKey;
         }
 
         private HttpClient BuildClient(string? sessionCookies = null, string? cookieOverride = null)
@@ -169,16 +406,23 @@ namespace MonitorBot.Infrastructure.Checkout
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://www.target.com");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.target.com/");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Site",     "same-site");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Mode",     "cors");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Dest",     "empty");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA",          "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA-Mobile",   "?0");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA-Platform", "\"Windows\"");
 
             var cookies = !string.IsNullOrWhiteSpace(sessionCookies) ? sessionCookies : cookieOverride;
             if (!string.IsNullOrEmpty(cookies))
             {
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", cookies);
 
-                // Target's cart API requires the accessToken as a Bearer token
-                // in the Authorization header — without it you get ERR_AUTH_DENIED
-                var accessToken = ExtractCookieValue(cookies, "accessToken")
-                               ?? ExtractCookieValue(cookies, "target_access_token");
+                // Prefer target_access_token (ID2) over accessToken (MI6).
+                // ID2 is accepted by both the cart and checkout endpoints.
+                // MI6 is only accepted by carts.target.com (ATC), not checkout.
+                var accessToken = ExtractCookieValue(cookies, "target_access_token")
+                               ?? ExtractCookieValue(cookies, "accessToken");
                 if (!string.IsNullOrEmpty(accessToken))
                     client.DefaultRequestHeaders.TryAddWithoutValidation(
                         "Authorization", $"Bearer {accessToken}");
@@ -188,67 +432,96 @@ namespace MonitorBot.Infrastructure.Checkout
             return client;
         }
 
-        private async Task<(bool ok, string error)> AddToCartAsync(
+        private async Task<(bool ok, string? cartId, string error)> AddToCartAsync(
             HttpClient client, string tcin, int quantity, string? rawCookies, CancellationToken ct)
         {
-            // Endpoint and key captured directly from Target's browser DevTools (July 2025)
-            const string apiKey      = "9f36aeafbe60771e321a7cc95a78140772ab3e96";
             const string fieldGroups = "CART%2CCART_ITEMS%2CSUMMARY";
-            var url = $"https://carts.target.com/web_checkouts/v1/cart_items" +
-                      $"?field_groups={fieldGroups}&key={apiKey}";
 
-            // Payload matches exactly what Target's web app sends (channel_id "10" = web/digital)
-            var payload = new JObject
+            // Fetch the live API key; on 401 invalidate cache and retry once
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                ["cart_item"] = new JObject
+                if (attempt == 1)
                 {
-                    ["item_channel_id"] = "10",
-                    ["tcin"]            = tcin,
-                    ["quantity"]        = quantity
-                },
-                ["cart_type"]       = "REGULAR",
-                ["channel_id"]      = "10",
-                ["fulfillment"]     = new JObject
+                    _apiKeyFetchedAt = DateTime.MinValue; // force refresh
+                    _logger.LogWarning("Target ATC 401 — forcing API key refresh");
+                }
+
+                var apiKey = await FetchApiKeyAsync(client, ct);
+                var url = $"https://carts.target.com/web_checkouts/v1/cart_items" +
+                          $"?field_groups={fieldGroups}&key={apiKey}";
+
+                var payload = new JObject
                 {
-                    ["type"]        = "SHIP",
-                    ["ship_method"] = "STANDARD"
-                },
-                ["shopping_context"] = "DIGITAL"
-            };
-            var payloadStr = payload.ToString(Newtonsoft.Json.Formatting.None);
+                    ["cart_item"] = new JObject
+                    {
+                        ["item_channel_id"] = "10",
+                        ["tcin"]            = tcin,
+                        ["quantity"]        = quantity
+                    },
+                    ["cart_type"]        = "REGULAR",
+                    ["channel_id"]       = "10",
+                    ["fulfillment"]      = new JObject
+                    {
+                        ["type"]        = "SHIP",
+                        ["ship_method"] = "STANDARD"
+                    },
+                    ["shopping_context"] = "DIGITAL"
+                };
+                var payloadStr = payload.ToString(Newtonsoft.Json.Formatting.None);
+                _logger.LogDebug("Target ATC payload: {P}", payloadStr);
 
-            _logger.LogDebug("Target ATC payload: {P}", payloadStr);
+                        using var req = new HttpRequestMessage(HttpMethod.Post, url);
+                        req.Content = new StringContent(payloadStr, Encoding.UTF8, "application/json");
+                        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+                        req.Headers.TryAddWithoutValidation("X-Application-Name", "web");
+                        req.Headers.TryAddWithoutValidation("X-Api-Key", apiKey);
 
-            using var req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Content = new StringContent(payloadStr, Encoding.UTF8, "application/json");
-            req.Headers.TryAddWithoutValidation("Accept", "application/json");
-            req.Headers.TryAddWithoutValidation("X-Application-Name", "web");
+                        var resp = await client.SendAsync(req, ct);
+                        var body = await resp.Content.ReadAsStringAsync(ct);
+                        var snippet = body.Length > 600 ? body[..600] : body;
 
-            var resp = await client.SendAsync(req, ct);
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            var snippet = body.Length > 600 ? body[..600] : body;
+                        _logger.LogDebug("Target ATC POST HTTP {S} tcin={T}: {B}",
+                            (int)resp.StatusCode, tcin, snippet);
 
-            _logger.LogDebug("Target ATC POST HTTP {S} tcin={T}: {B}",
-                (int)resp.StatusCode, tcin, snippet);
+                        // 401 on first attempt = stale key; loop will refresh and retry
+                        if ((int)resp.StatusCode == 401 && attempt == 0)
+                            continue;
 
-            if (resp.IsSuccessStatusCode)
-                return (true, string.Empty);
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            string? cartId = null;
+                            try
+                            {
+                                var j = JObject.Parse(body);
+                                cartId = j["cart_id"]?.ToString()
+                                      ?? j["id"]?.ToString()
+                                      ?? j["cart"]?["id"]?.ToString();
+                            }
+                            catch { }
+                            _logger.LogWarning("Target ATC succeeded, cartId={CartId}, rawBody={Body}", cartId, snippet);
+                            Log("INFO", $"[Target] ATC OK — cartId={cartId ?? "NULL"} | body={snippet}");
+                            return (true, cartId, string.Empty);
+                        }
 
-            string lastError;
-            try
-            {
-                var j = JObject.Parse(body);
-                lastError = $"HTTP {(int)resp.StatusCode}: " +
-                    (j["message"]?.ToString()
-                  ?? j["error"]?.ToString()
-                  ?? j["errors"]?[0]?["message"]?.ToString()
-                  ?? snippet);
-            }
-            catch { lastError = $"HTTP {(int)resp.StatusCode}: {snippet}"; }
+                        string lastError;
+                        try
+                        {
+                            var j = JObject.Parse(body);
+                            lastError = $"HTTP {(int)resp.StatusCode}: " +
+                                (j["message"]?.ToString()
+                              ?? j["error"]?.ToString()
+                              ?? j["errors"]?[0]?["message"]?.ToString()
+                              ?? snippet);
+                        }
+                        catch { lastError = $"HTTP {(int)resp.StatusCode}: {snippet}"; }
 
-            _logger.LogWarning("Target ATC failed: {E}", lastError);
-            return (false, $"ATC failed — {lastError}");
-        }
+                        _logger.LogWarning("Target ATC failed: {E}", lastError);
+                        Log("WARN", $"[Target] ATC failed — {lastError}");
+                        return (false, null, $"ATC failed — {lastError}");
+                    }
+
+                        return (false, null, "ATC failed — could not authenticate with Target API after key refresh");
+                    }
 
         /// <summary>Extracts a single cookie value from a raw Cookie header string.</summary>
         private static string? ExtractCookieValue(string? rawCookies, string name)
@@ -265,77 +538,154 @@ namespace MonitorBot.Infrastructure.Checkout
             return null;
         }
 
-        private async Task<string?> PlaceOrderAsync(
-            HttpClient client, string tcin, UserProfile profile, int quantity, CancellationToken ct)
+        private async Task<(string? orderId, string? error)> PlaceOrderAsync(
+            HttpClient client, string? cartId, string tcin, UserProfile profile, int quantity, CancellationToken ct)
         {
-            var url = "https://carts.target.com/web_checkouts/v1/checkout?key=9f36aeafbe60771e321a7cc95a78140772ab3e96";
+            if (string.IsNullOrWhiteSpace(cartId))
+                return (null, "cart_id was not returned by Add-to-Cart — cannot submit order.");
+
+            var apiKey  = await FetchApiKeyAsync(client, ct);
+            var baseUrl = $"https://carts.target.com/web_checkouts/v1/checkout?key={apiKey}";
 
             var addr = profile.ShippingAddress;
             var pay  = profile.Payment;
 
-            var payload = new JObject
+            Log("INFO", $"[Target] Profile addr: '{addr.Line1}', '{addr.City}', '{addr.State}', '{addr.ZipCode}' | email='{profile.Email}'");
+
+            // ── Helpers ───────────────────────────────────────────────────
+            static string CheckoutError(string body)
             {
-                ["addresses"] = new JArray
+                try
                 {
-                    new JObject
-                    {
-                        ["address_type"]  = "SHIPPING",
-                        ["first_name"]    = profile.FirstName,
-                        ["last_name"]     = profile.LastName,
-                        ["email_address"] = profile.Email,
-                        ["phone"]         = profile.Phone,
-                        ["line1"]         = addr.Line1,
-                        ["line2"]         = addr.Line2,
-                        ["city"]          = addr.City,
-                        ["state"]         = addr.State,
-                        ["zip_code"]      = addr.ZipCode,
-                        ["country_code"]  = "US"
-                    }
+                    var j = JObject.Parse(body);
+                    return j["message"]?.ToString()
+                        ?? j["error"]?.ToString()
+                        ?? j["errors"]?[0]?["message"]?.ToString()
+                        ?? j["checkout_error"]?["message"]?.ToString()
+                        ?? j["fault"]?["faultstring"]?.ToString()
+                        ?? body;
+                }
+                catch { return body; }
+            }
+
+            async Task<(bool ok, string body)> Send(HttpMethod method, string url, JObject? payload)
+            {
+                using var r = new HttpRequestMessage(method, url);
+                r.Headers.TryAddWithoutValidation("Accept",              "application/json");
+                r.Headers.TryAddWithoutValidation("X-Api-Key",           apiKey);
+                r.Headers.TryAddWithoutValidation("X-Application-Name",  "web");
+                r.Headers.TryAddWithoutValidation("Origin",              "https://www.target.com");
+                r.Headers.TryAddWithoutValidation("Referer",             "https://www.target.com/");
+                r.Headers.TryAddWithoutValidation("Accept-Language",     "en-US,en;q=0.9");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Site",      "same-site");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Mode",      "cors");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Dest",      "empty");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA",           "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA-Mobile",    "?0");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA-Platform",  "\"Windows\"");
+                if (payload != null)
+                    r.Content = new StringContent(
+                        payload.ToString(Newtonsoft.Json.Formatting.None),
+                        Encoding.UTF8, "application/json");
+                var rs = await client.SendAsync(r, ct);
+                var b  = await rs.Content.ReadAsStringAsync(ct);
+                return (rs.IsSuccessStatusCode, b);
+            }
+
+            // ── Step 1: GET — initialise checkout session ─────────────────
+            // This call registers the cart on Target's checkout server so
+            // subsequent PATCHes know which session to modify.
+            var initUrl = $"{baseUrl}&cart_id={cartId}&field_groups=CHECKOUT%2CCART%2CPAYMENT%2CADDRESS";
+            var (initOk, initBody) = await Send(HttpMethod.Get, initUrl, null);
+            Log(initOk ? "INFO" : "WARN",
+                $"[Target] Init checkout HTTP {(initOk ? "OK" : "FAIL")}: {(initBody.Length > 300 ? initBody[..300] : initBody)}");
+            if (!initOk)
+            {
+                // Non-fatal — some accounts work without it; continue anyway
+                Log("WARN", "[Target] Init checkout failed (continuing)");
+            }
+
+            // Build shipping address object
+            var shippingAddr = new JObject
+            {
+                ["address_type"]    = "SHIPPING",
+                ["first_name"]      = profile.FirstName,
+                ["last_name"]       = profile.LastName,
+                ["email_address"]   = profile.Email,
+                ["phone"]           = profile.Phone,
+                ["mobile_phone"]    = profile.Phone,
+                ["line1"]           = addr.Line1,
+                ["city"]            = addr.City,
+                ["state"]           = addr.State,
+                ["zip_code"]        = addr.ZipCode,
+                ["country_code"]    = "US",
+                ["save_as_default"] = false
+            };
+            if (!string.IsNullOrWhiteSpace(addr.Line2))
+                shippingAddr["line2"] = addr.Line2;
+
+            var billingLine1 = profile.BillingAddress?.Line1?.Length  > 0 ? profile.BillingAddress.Line1   : addr.Line1;
+            var billingCity  = profile.BillingAddress?.City?.Length   > 0 ? profile.BillingAddress.City    : addr.City;
+            var billingState = profile.BillingAddress?.State?.Length  > 0 ? profile.BillingAddress.State   : addr.State;
+            var billingZip   = profile.BillingAddress?.ZipCode?.Length > 0 ? profile.BillingAddress.ZipCode : addr.ZipCode;
+
+            // ── Single POST — full checkout payload ───────────────────────
+            // Target's Go-Proxy blocks PATCH from non-browser clients regardless
+            // of CORS headers. POST is the only method accepted without a real
+            // browser TLS fingerprint. We send the complete checkout state in
+            // one POST (same shape used by Target's mobile app).
+            var orderPayload = new JObject
+            {
+                ["cart_id"]          = cartId,
+                ["cart_type"]        = "REGULAR",
+                ["channel_id"]       = "10",
+                ["shopping_context"] = "DIGITAL",
+                ["guest"] = new JObject
+                {
+                    ["email_address"] = profile.Email,
+                    ["first_name"]    = profile.FirstName,
+                    ["last_name"]     = profile.LastName
                 },
+                ["addresses"] = new JArray { shippingAddr },
                 ["payment_instructions"] = new JArray
                 {
                     new JObject
                     {
                         ["payment_type"]    = "CREDITCARD",
                         ["card_number"]     = pay.CardNumber,
-                        ["expiration_date"] = $"{pay.ExpiryMonth}/{pay.ExpiryYear}",
+                        ["name_on_card"]    = !string.IsNullOrWhiteSpace(pay.CardHolder)
+                                             ? pay.CardHolder
+                                             : $"{profile.FirstName} {profile.LastName}".Trim(),
+                        ["expiration_date"] = $"{pay.ExpiryMonth.PadLeft(2, '0')}/{pay.ExpiryYear}",
                         ["cvv"]             = pay.Cvv,
                         ["billing_address"] = new JObject
                         {
-                            ["first_name"] = profile.FirstName,
-                            ["last_name"]  = profile.LastName,
-                            ["line1"]      = profile.BillingAddress.Line1.Length > 0
-                                             ? profile.BillingAddress.Line1 : addr.Line1,
-                            ["city"]       = profile.BillingAddress.City.Length > 0
-                                             ? profile.BillingAddress.City : addr.City,
-                            ["state"]      = profile.BillingAddress.State.Length > 0
-                                             ? profile.BillingAddress.State : addr.State,
-                            ["zip_code"]   = profile.BillingAddress.ZipCode.Length > 0
-                                             ? profile.BillingAddress.ZipCode : addr.ZipCode,
+                            ["first_name"]   = profile.FirstName,
+                            ["last_name"]    = profile.LastName,
+                            ["line1"]        = billingLine1,
+                            ["city"]         = billingCity,
+                            ["state"]        = billingState,
+                            ["zip_code"]     = billingZip,
                             ["country_code"] = "US"
                         }
                     }
                 }
             };
 
-            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            Log("INFO", $"[Target] POST checkout for cart {cartId}");
+            var (orderOk, orderBody) = await Send(HttpMethod.Post, baseUrl, orderPayload);
+            if (!orderOk)
             {
-                Content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json")
-            };
-            req.Headers.TryAddWithoutValidation("Accept", "application/json");
-
-            var resp = await client.SendAsync(req, ct);
-            if (!resp.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Target place-order HTTP {Status}", (int)resp.StatusCode);
-                return null;
+                Log("WARN", $"[Target] PlaceOrder FAIL raw: {(orderBody.Length > 600 ? orderBody[..600] : orderBody)}");
+                return (null, $"HTTP — {CheckoutError(orderBody)}");
             }
 
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            var json = JObject.Parse(body);
-            return json["order_id"]?.ToString()
-                ?? json["id"]?.ToString()
-                ?? Guid.NewGuid().ToString("N")[..12];
+            var json = JObject.Parse(orderBody);
+            var id = json["order_id"]?.ToString()
+                  ?? json["id"]?.ToString()
+                  ?? Guid.NewGuid().ToString("N")[..12];
+            Log("INFO", $"[Target] Order placed! orderId={id}");
+            return (id, null);
         }
     }
 }

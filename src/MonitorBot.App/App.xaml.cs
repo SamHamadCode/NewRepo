@@ -89,6 +89,17 @@ namespace MonitorBot.App
             services.AddSingleton<TargetLoginService>();
             services.AddSingleton<WalmartLoginService>();
             services.AddSingleton<WalmartCheckoutService>();
+            // TargetBrowserCheckout must be created on the UI thread — use a factory
+            services.AddSingleton<ITargetBrowserCheckout>(p =>
+            {
+                var logStore = p.GetRequiredService<ILogStore>();
+                TargetBrowserCheckout? instance = null;
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    instance = new MonitorBot.App.Views.TargetBrowserCheckout(logStore);
+                });
+                return instance!;
+            });
             services.AddSingleton<TargetCheckoutService>();
             services.AddSingleton<ICheckoutService, CheckoutRouter>();
             services.AddSingleton<NotificationService>();

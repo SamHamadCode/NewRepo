@@ -19,6 +19,7 @@ namespace MonitorBot.Infrastructure.Checkout
 
         private const string GuestTokenUrl =
             "https://gsp.target.com/v1/guest_tokens?client_id=ecom-web-1.0.0&channel=WEB&page=%2F";
+        private const string GuestTokenApiKey = "ff457966e64d5e877fdbad070f276d18ecec4a01";
         private const string LoginUrl =
             "https://account.target.com/accounts/v4/login";
         private const string VerifyUrl =
@@ -169,6 +170,58 @@ namespace MonitorBot.Infrastructure.Checkout
                 _logger.LogWarning(ex, "Target login exception for {Email}", account.Email);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Fetches a fresh ID2 guest Bearer token from gsp.target.com.
+        /// Uses the exact same client setup as LoginAsync so it works reliably.
+        /// </summary>
+        public async Task<(string? token, int status, string body)> GetGuestTokenAsync(
+            string? existingCookies = null, CancellationToken ct = default)
+        {
+            // Identical setup to LoginAsync Step 1 — no extra headers.
+            var cookieContainer = new CookieContainer();
+            using var handler = new HttpClientHandler
+            {
+                CookieContainer = cookieContainer,
+                UseCookies = true,
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+                AllowAutoRedirect = true
+            };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            AddBaseHeaders(client);
+
+            try
+            {
+                var resp = await client.GetAsync(GuestTokenUrl, ct);
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("GetGuestTokenAsync HTTP {Status}: {Body}",
+                    (int)resp.StatusCode, body.Length > 400 ? body[..400] : body);
+
+                if (!resp.IsSuccessStatusCode)
+                    return (null, (int)resp.StatusCode, body);
+
+                var token = JObject.Parse(body)["access_token"]?.ToString();
+                return (token, (int)resp.StatusCode, body);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetGuestTokenAsync failed");
+                return (null, 0, ex.Message);
+            }
+        }
+
+        private static string? ExtractCookieValue(string rawCookies, string name)
+        {
+            foreach (var part in rawCookies.Split(';'))
+            {
+                var kv = part.Trim();
+                var eq = kv.IndexOf('=');
+                if (eq <= 0) continue;
+                if (kv[..eq].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return Uri.UnescapeDataString(kv[(eq + 1)..].Trim());
+            }
+            return null;
         }
 
         private static void AddBaseHeaders(HttpClient client)
