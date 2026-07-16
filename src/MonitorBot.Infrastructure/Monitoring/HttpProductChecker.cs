@@ -8,7 +8,6 @@ using Microsoft.Extensions.Logging;
 using MonitorBot.Core.Enums;
 using MonitorBot.Core.Interfaces;
 using MonitorBot.Core.Models;
-using MonitorBot.Infrastructure.Browser;
 
 namespace MonitorBot.Infrastructure.Monitoring
 {
@@ -16,7 +15,7 @@ namespace MonitorBot.Infrastructure.Monitoring
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<HttpProductChecker> _logger;
-        private readonly PlaywrightStockChecker _playwrightChecker;
+        private readonly HttpStockChecker _httpStockChecker;
 
         // ?? Title ??????????????????????????????????????????????????????
         // 1) og:title meta tag  2) <title> tag
@@ -70,11 +69,11 @@ namespace MonitorBot.Infrastructure.Monitoring
         public HttpProductChecker(
             IHttpClientFactory httpClientFactory,
             ILogger<HttpProductChecker> logger,
-            PlaywrightStockChecker playwrightChecker)
+            HttpStockChecker httpStockChecker)
         {
-            _httpClientFactory  = httpClientFactory;
-            _logger             = logger;
-            _playwrightChecker  = playwrightChecker;
+            _httpClientFactory = httpClientFactory;
+            _logger            = logger;
+            _httpStockChecker  = httpStockChecker;
         }
 
         public async Task<MonitorResult> CheckAsync(MonitorTask task, CancellationToken ct = default)
@@ -84,10 +83,15 @@ namespace MonitorBot.Infrastructure.Monitoring
             {
                 var url = task.TargetUrl ?? "";
 
-                // Target and Walmart load availability via JavaScript — must use Playwright
-                if (url.Contains("target.com", StringComparison.OrdinalIgnoreCase) ||
-                    url.Contains("walmart.com", StringComparison.OrdinalIgnoreCase))
-                    return await _playwrightChecker.CheckAsync(task, ct);
+                // Route known sites through HttpStockChecker (pure HTTP API, no browser)
+                if (url.Contains("target.com", StringComparison.OrdinalIgnoreCase)      ||
+                    url.Contains("walmart.com", StringComparison.OrdinalIgnoreCase)      ||
+                    url.Contains("bestbuy.com", StringComparison.OrdinalIgnoreCase)      ||
+                    url.Contains("costco.com", StringComparison.OrdinalIgnoreCase)       ||
+                    url.Contains("samsclub.com", StringComparison.OrdinalIgnoreCase)     ||
+                    url.Contains("pokemoncenter.com", StringComparison.OrdinalIgnoreCase)||
+                    url.Contains("p-bandai.com", StringComparison.OrdinalIgnoreCase))
+                    return await _httpStockChecker.CheckAsync(task, ct);
 
                 // Generic HTML fallback for other sites
                 using var client = _httpClientFactory.CreateClient("monitor");

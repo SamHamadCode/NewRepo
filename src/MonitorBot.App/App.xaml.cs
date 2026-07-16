@@ -8,8 +8,6 @@ using Microsoft.Extensions.Logging;
 using MonitorBot.App.ViewModels;
 using MonitorBot.App.Views;
 using MonitorBot.Core.Interfaces;
-using MonitorBot.Infrastructure.Browser;
-using MonitorBot.Infrastructure.Captcha;
 using MonitorBot.Infrastructure.Checkout;
 using MonitorBot.Infrastructure.Email;
 using MonitorBot.Infrastructure.IO;
@@ -81,24 +79,22 @@ namespace MonitorBot.App
             services.AddSingleton<ILogStore>(_ => new FileLogStore(dataDir));
             services.AddSingleton<ISettingsService>(_ => new SettingsService(dataDir));
             services.AddSingleton<ITaskRepository>(_ => new TaskRepository(dataDir));
+            services.AddSingleton<ITaskGroupRepository>(_ => new TaskGroupRepository(dataDir));
             services.AddSingleton<IProfileRepository>(_ => new ProfileRepository(dataDir));
             services.AddSingleton<IAccountRepository>(_ => new AccountRepository(dataDir));
             services.AddSingleton<IProxyRepository>(_ => new ProxyRepository(dataDir));
             services.AddSingleton<IProductChecker, HttpProductChecker>();
-            services.AddSingleton<PlaywrightStockChecker>();
+            services.AddSingleton<HttpStockChecker>();
             services.AddSingleton<EmailVerificationService>();
-            services.AddSingleton<CaptchaSolverService>();
             services.AddSingleton<TargetLoginService>();
             services.AddSingleton<WalmartLoginService>();
             services.AddSingleton<WalmartCheckoutService>();
             services.AddSingleton<TargetCheckoutService>();
-            services.AddSingleton<PlaywrightCheckoutService>();
             services.AddSingleton<ICheckoutService, CheckoutRouter>();
             services.AddSingleton<NotificationService>();
             services.AddSingleton<INotificationService>(p => p.GetRequiredService<NotificationService>());
             services.AddSingleton<IMonitorService, MonitorService>();
             services.AddSingleton<IUpdateService, UpdateService>();
-            services.AddSingleton<IBrowserSessionService, BrowserSessionService>();
             services.AddSingleton<IImportExportService, ImportExportService>();
 
             // ViewModels
@@ -106,6 +102,7 @@ namespace MonitorBot.App
             services.AddSingleton<TasksViewModel>(p => new TasksViewModel(
                 p.GetRequiredService<IMonitorService>(),
                 p.GetRequiredService<ITaskRepository>(),
+                p.GetRequiredService<ITaskGroupRepository>(),
                 p.GetRequiredService<IProfileRepository>(),
                 p.GetRequiredService<IAccountRepository>()));
             services.AddSingleton<ProfilesViewModel>();

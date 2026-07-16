@@ -8,9 +8,13 @@
     <!-- Converters -->
     <conv:BoolToVisibilityConverter        x:Key="BoolToVisibility"/>
     <conv:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility"/>
+    <conv:NullToVisibilityConverter        x:Key="NullToVisibility"/>
+    <conv:ZeroToVisibilityConverter        x:Key="ZeroToVisibility"/>
     <conv:NullToBoolConverter              x:Key="NullToBool"/>
     <conv:LogLevelToColorConverter         x:Key="LevelToColor"/>
     <conv:StatusToColorConverter           x:Key="StatusToColor"/>
+    <conv:NavStyleSelectorConverter        x:Key="NavStyleSelector"/>
+    <conv:StatusBgConverter                x:Key="StatusBgConverter"/>
 
     <!-- Enum sources -->
     <ObjectDataProvider x:Key="MonitorTypeValues"

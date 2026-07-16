@@ -6,13 +6,17 @@
         ShowInTaskbar="False" ResizeMode="NoResize"
         SizeToContent="WidthAndHeight"
         WindowStartupLocation="Manual">
-    <Border CornerRadius="8" Background="#1E1E2E" BorderBrush="#3A3A5C" BorderThickness="1"
-            Padding="16,12" MinWidth="300" MaxWidth="400">
+    <Border CornerRadius="8" Background="#0F0F15"
+            BorderBrush="#00C8FF44" BorderThickness="1"
+            Padding="18,14" MinWidth="300" MaxWidth="420">
         <StackPanel>
-            <TextBlock x:Name="TitleText" FontSize="13" FontWeight="Bold"
-                       Foreground="#FFFFFF" Margin="0,0,0,6" TextWrapping="Wrap"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <Ellipse Width="8" Height="8" Fill="#00C8FF" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TitleText" FontSize="13" FontWeight="Bold"
+                           Foreground="#E8E8F0" TextWrapping="Wrap"/>
+            </StackPanel>
             <TextBlock x:Name="MessageText" FontSize="12"
-                       Foreground="#BBBBCC" TextWrapping="Wrap"/>
+                       Foreground="#7878A0" TextWrapping="Wrap" Margin="16,0,0,0"/>
         </StackPanel>
     </Border>
 </Window>

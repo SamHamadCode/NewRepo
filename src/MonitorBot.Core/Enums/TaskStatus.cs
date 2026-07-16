@@ -9,6 +9,9 @@ namespace MonitorBot.Core.Enums
         Failed,
         Retrying,
         Scheduled,
-        CheckingOut
+        CheckingOut,
+        LoggingIn,
+        AddingToCart,
+        PlacingOrder
     }
 }

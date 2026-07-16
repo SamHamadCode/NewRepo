@@ -36,4 +36,12 @@ namespace MonitorBot.Infrastructure.Persistence
 
         protected override string GetId(ProxyEntry item) => item.Id;
     }
+
+    public class TaskGroupRepository : JsonRepository<TaskGroup>, ITaskGroupRepository
+    {
+        public TaskGroupRepository(string dataDir)
+            : base(System.IO.Path.Combine(dataDir, "taskgroups.json")) { }
+
+        protected override string GetId(TaskGroup item) => item.Id.ToString();
+    }
 }

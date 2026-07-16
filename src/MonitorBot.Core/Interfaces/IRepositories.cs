@@ -13,6 +13,14 @@ namespace MonitorBot.Core.Interfaces
         Task SaveAllAsync(IEnumerable<MonitorTask> tasks);
     }
 
+    public interface ITaskGroupRepository
+    {
+        Task<IEnumerable<TaskGroup>> GetAllAsync();
+        Task<TaskGroup?> GetByIdAsync(string id);
+        Task SaveAsync(TaskGroup group);
+        Task DeleteAsync(string id);
+    }
+
     public interface IProfileRepository
     {
         Task<IEnumerable<UserProfile>> GetAllAsync();

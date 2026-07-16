@@ -9,6 +9,7 @@ namespace MonitorBot.Core.Interfaces
     {
         event EventHandler<MonitorResult>? ResultReceived;
         event EventHandler<MonitorTask>? TaskStatusChanged;
+        event EventHandler<CheckoutResult>? CheckoutCompleted;
 
         Task StartTaskAsync(MonitorTask task, CancellationToken ct = default);
         Task StopTaskAsync(Guid taskId);

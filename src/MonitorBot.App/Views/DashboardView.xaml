@@ -1,74 +1,84 @@
 <UserControl x:Class="MonitorBot.App.Views.DashboardView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="24">
+    <DockPanel>
+        <!-- Page header -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource BgPanel}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                Padding="24,14">
+            <TextBlock Text="Dashboard" Style="{StaticResource TextH1}"/>
+        </Border>
 
-            <!-- Header -->
-            <TextBlock Text="Dashboard" Style="{StaticResource TextH1}" Margin="0,0,0,24"/>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24">
 
-            <!-- Stat Cards Row -->
-            <WrapPanel Margin="0,0,0,24">
-                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
-                    <StackPanel>
-                        <TextBlock Text="TOTAL TASKS" Style="{StaticResource TextCaption}"/>
-                        <TextBlock Text="{Binding TotalTasks}" FontSize="32" FontWeight="Bold"
-                                   Foreground="{StaticResource Accent}" Margin="0,4,0,0"/>
+                <!-- Stat cards row -->
+                <UniformGrid Rows="1" Margin="0,0,0,20">
+                    <Border Style="{StaticResource StatCard}" Margin="0,0,10,0">
+                        <StackPanel>
+                            <TextBlock Text="TOTAL TASKS" Style="{StaticResource TextLabel}"/>
+                            <TextBlock Text="{Binding TotalTasks}" FontSize="36" FontWeight="Bold"
+                                       Foreground="{StaticResource Accent}" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource StatCard}" Margin="0,0,10,0">
+                        <StackPanel>
+                            <TextBlock Text="RUNNING" Style="{StaticResource TextLabel}"/>
+                            <TextBlock Text="{Binding RunningTasks}" FontSize="36" FontWeight="Bold"
+                                       Foreground="{StaticResource Success}" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource StatCard}" Margin="0,0,10,0">
+                        <StackPanel>
+                            <TextBlock Text="IN STOCK HITS" Style="{StaticResource TextLabel}"/>
+                            <TextBlock Text="{Binding SuccessCount}" FontSize="36" FontWeight="Bold"
+                                       Foreground="{StaticResource Success}" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource StatCard}">
+                        <StackPanel>
+                            <TextBlock Text="FAILURES" Style="{StaticResource TextLabel}"/>
+                            <TextBlock Text="{Binding FailureCount}" FontSize="36" FontWeight="Bold"
+                                       Foreground="{StaticResource Danger}" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Border>
+                </UniformGrid>
+
+                <!-- Update available banner -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,12"
+                        Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock FontSize="13" FontWeight="SemiBold" Margin="0,0,0,4">
+                                <Run Text="?  Update Available" Foreground="{StaticResource Warning}"/>
+                            </TextBlock>
+                            <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextCaption}"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button Content="Install Update" Style="{StaticResource PrimaryButton}"
+                                    Command="{Binding InstallUpdateCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Check Again" Style="{StaticResource SecondaryButton}"
+                                    Command="{Binding CheckUpdateCommand}"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Up to date -->
+                <Border Style="{StaticResource Card}"
+                        Visibility="{Binding HasUpdate, Converter={StaticResource InverseBoolToVisibility}}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="?  " Foreground="{StaticResource Success}" FontSize="14"
+                                   FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextBody}"
+                                   VerticalAlignment="Center"/>
                     </StackPanel>
                 </Border>
-                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
-                    <StackPanel>
-                        <TextBlock Text="RUNNING" Style="{StaticResource TextCaption}"/>
-                        <TextBlock Text="{Binding RunningTasks}" FontSize="32" FontWeight="Bold"
-                                   Foreground="{StaticResource Success}" Margin="0,4,0,0"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
-                    <StackPanel>
-                        <TextBlock Text="SUCCESSES" Style="{StaticResource TextCaption}"/>
-                        <TextBlock Text="{Binding SuccessCount}" FontSize="32" FontWeight="Bold"
-                                   Foreground="{StaticResource Success}" Margin="0,4,0,0"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource StatCard}" Margin="0,0,12,12">
-                    <StackPanel>
-                        <TextBlock Text="FAILURES" Style="{StaticResource TextCaption}"/>
-                        <TextBlock Text="{Binding FailureCount}" FontSize="32" FontWeight="Bold"
-                                   Foreground="{StaticResource Danger}" Margin="0,4,0,0"/>
-                    </StackPanel>
-                </Border>
-            </WrapPanel>
 
-            <!-- Update Banner -->
-            <Border Style="{StaticResource Card}" Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}">
-                <DockPanel>
-                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                        <Button Content="Install Update"
-                                Style="{StaticResource PrimaryButton}"
-                                Command="{Binding InstallUpdateCommand}"
-                                Margin="0,0,8,0"/>
-                        <Button Content="Check Again"
-                                Style="{StaticResource SecondaryButton}"
-                                Command="{Binding CheckUpdateCommand}"/>
-                    </StackPanel>
-                    <StackPanel>
-                        <TextBlock Text="?? Update Available" Style="{StaticResource TextH2}"
-                                   Foreground="{StaticResource Warning}"/>
-                        <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextCaption}"
-                                   Margin="0,4,0,0"/>
-                    </StackPanel>
-                </DockPanel>
-            </Border>
-
-            <!-- Up to date message -->
-            <Border Style="{StaticResource Card}" Margin="0,12,0,0"
-                    Visibility="{Binding HasUpdate, Converter={StaticResource InverseBoolToVisibility}}">
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="? " FontSize="16"/>
-                    <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource TextBody}"/>
-                </StackPanel>
-            </Border>
-
-        </StackPanel>
-    </ScrollViewer>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
 </UserControl>

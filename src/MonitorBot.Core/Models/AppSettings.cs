@@ -20,10 +20,6 @@ namespace MonitorBot.Core.Models
         // Captcha solving
         public string TwoCaptchaApiKey { get; set; } = string.Empty;
 
-        // Playwright stealth browser checkout
-        public bool UsePlaywrightCheckout { get; set; } = false;
-        public bool HeadlessBrowser { get; set; } = false;
-
         public string LogLevel { get; set; } = "Information";
         public int LogRetentionDays { get; set; } = 7;
         public string LastVersion { get; set; } = string.Empty;

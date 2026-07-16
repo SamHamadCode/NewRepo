@@ -12,11 +12,15 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="5.0.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="MailKit" Version="4.3.0" />
-    <PackageReference Include="Microsoft.Playwright" Version="1.44.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\MonitorBot.Core\MonitorBot.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Browser\" />
+    <Folder Include="Captcha\" />
   </ItemGroup>
 
 </Project>

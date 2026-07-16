@@ -16,11 +16,10 @@ using Newtonsoft.Json.Linq;
 namespace MonitorBot.Infrastructure.Checkout
 {
     /// <summary>
-    /// Walmart guest checkout flow:
-    ///   1. Fetch product page  ? extract item ID + WM_* tokens
-    ///   2. POST /api/v3/cart/guest/{cartId}/items  ? add to cart
-    ///   3. POST /api/v3/checkout/guest/contract    ? create contract
-    ///   4. POST /api/v3/checkout/guest/order       ? place order
+    /// Walmart checkout flow � mirrors RefractBot step-by-step:
+    ///   1. LoggingIn    � authenticate with account (if assigned)
+    ///   2. AddingToCart � add the exact requested quantity to the cart
+    ///   3. PlacingOrder � contract + order submission
     /// </summary>
     public class WalmartCheckoutService : ICheckoutService
     {
@@ -49,35 +48,50 @@ namespace MonitorBot.Infrastructure.Checkout
             UserProfile profile,
             SiteAccount? account,
             MonitorResult monitorResult,
+            Action<MonitorTaskStatus>? onStatus = null,
             CancellationToken ct = default)
         {
             var result = new CheckoutResult { TaskId = task.Id };
-            _logger.LogInformation("Starting checkout for task {Name}", task.Name);
+            _logger.LogInformation("Starting Walmart checkout for task {Name}", task.Name);
+
+            // Clamp quantity � never send 0 or an absurdly large number
+            var quantity = Math.Max(1, Math.Min(task.Quantity, 10));
 
             try
             {
-                // ?? Login if account is assigned ?????????????????????
+                // ── Step 1: Auth ───────────────────────────────────────────
+                // Priority: harvested cookies → account login → guest
                 string? sessionCookies = null;
-                if (account != null)
+                if (!string.IsNullOrWhiteSpace(task.CookieOverride))
                 {
-                    _logger.LogInformation("Logging into Walmart account: {Email}", account.Email);
+                    sessionCookies = task.CookieOverride;
+                    _logger.LogInformation("Using harvested cookies for Walmart checkout");
+                }
+                else if (account != null)
+                {
+                    onStatus?.Invoke(MonitorTaskStatus.LoggingIn);
+                    _logger.LogInformation("Attempting Walmart account login: {Email}", account.Email);
                     sessionCookies = await _loginService.LoginAsync(account, ct);
                     if (sessionCookies == null)
                     {
                         result.Status = CheckoutStatus.Failed;
-                        result.ErrorMessage = $"Login failed for account: {account.Email}";
+                        result.ErrorMessage =
+                            $"Login failed for {account.Email}. " +
+                            "Walmart blocks automated logins — use 'Auto-Harvest Cookies' in the task editor instead.";
                         return result;
                     }
-                    _logger.LogInformation("Walmart login successful, proceeding with authenticated checkout");
+                    _logger.LogInformation("Walmart login successful");
                 }
                 else
                 {
-                    _logger.LogInformation("No account assigned � proceeding as Walmart guest checkout");
+                    _logger.LogInformation("No account or cookies — proceeding as Walmart guest checkout");
                 }
 
-                using var client = BuildClient(sessionCookies);
+                using var client = BuildClient(sessionCookies, null);
 
-                // ?? Step 1: Fetch product page & extract item ID ?????????
+                // ?? Step 2: Add to cart ????????????????????????????????????
+                onStatus?.Invoke(MonitorTaskStatus.AddingToCart);
+
                 var itemId = ExtractItemId(task.TargetUrl);
                 if (string.IsNullOrEmpty(itemId))
                 {
@@ -96,18 +110,19 @@ namespace MonitorBot.Infrastructure.Checkout
                     return result;
                 }
 
-                // ?? Step 2: Add to cart ??????????????????????????????????
-                var addedToCart = await AddToCartAsync(client, cartId, itemId, task.Quantity, csrfToken, ct);
+                var addedToCart = await AddToCartAsync(client, cartId, itemId, quantity, csrfToken, ct);
                 if (!addedToCart)
                 {
                     result.Status = CheckoutStatus.OutOfStock;
-                    result.ErrorMessage = "Add-to-cart failed � item may have sold out.";
+                    result.ErrorMessage = "Add-to-cart failed � item may have sold out.";
                     return result;
                 }
 
-                _logger.LogInformation("Added item {ItemId} to cart {CartId}", itemId, cartId);
+                _logger.LogInformation("Added item {ItemId} �{Qty} to cart {CartId}", itemId, quantity, cartId);
 
-                // ?? Step 3: Create checkout contract ?????????????????????
+                // ?? Step 3: Place order ????????????????????????????????????
+                onStatus?.Invoke(MonitorTaskStatus.PlacingOrder);
+
                 var contractId = await CreateContractAsync(client, cartId, profile, csrfToken, ct);
                 if (string.IsNullOrEmpty(contractId))
                 {
@@ -116,19 +131,18 @@ namespace MonitorBot.Infrastructure.Checkout
                     return result;
                 }
 
-                // ?? Step 4: Place order ???????????????????????????????????
                 var orderId = await PlaceOrderAsync(client, contractId, profile, csrfToken, ct);
                 if (string.IsNullOrEmpty(orderId))
                 {
                     result.Status = CheckoutStatus.CardDeclined;
-                    result.ErrorMessage = "Order submission failed � check card details.";
+                    result.ErrorMessage = "Order submission failed � check card details.";
                     return result;
                 }
 
                 result.IsSuccess = true;
                 result.Status = CheckoutStatus.Success;
                 result.OrderId = orderId;
-                _logger.LogInformation("Order placed! OrderId={OrderId}", orderId);
+                _logger.LogInformation("Walmart order placed! OrderId={OrderId}", orderId);
             }
             catch (OperationCanceledException)
             {
@@ -145,18 +159,19 @@ namespace MonitorBot.Infrastructure.Checkout
             return result;
         }
 
-        // ?? Helpers ??????????????????????????????????????????????????????
+        // ?? Helpers ???????????????????????????????????????????????????????????
 
-        private HttpClient BuildClient(string? sessionCookies = null)
+        private HttpClient BuildClient(string? sessionCookies = null, string? cookieOverride = null)
         {
+            // IMPORTANT: UseCookies=false so the manually-injected Cookie header
+            // is not stripped by the handler's own cookie management.
             var handler = new HttpClientHandler
             {
                 AutomaticDecompression = DecompressionMethods.GZip
                                        | DecompressionMethods.Deflate
                                        | DecompressionMethods.Brotli,
                 AllowAutoRedirect = true,
-                UseCookies = true,
-                CookieContainer = new CookieContainer()
+                UseCookies = false
             };
 
             var client = new HttpClient(handler);
@@ -165,14 +180,16 @@ namespace MonitorBot.Infrastructure.Checkout
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0.0.0 Safari/537.36");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://www.walmart.com");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.walmart.com/");
 
-            // Inject session cookies from login if available
-            if (!string.IsNullOrEmpty(sessionCookies))
-                client.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", sessionCookies);
+            // Prefer account session cookies; fall back to manually pasted cookies
+            var cookies = !string.IsNullOrWhiteSpace(sessionCookies) ? sessionCookies : cookieOverride;
+            if (!string.IsNullOrEmpty(cookies))
+                client.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", cookies);
 
-            client.Timeout = TimeSpan.FromSeconds(20);
+            client.Timeout = TimeSpan.FromSeconds(30);
             return client;
         }
 
@@ -189,12 +206,11 @@ namespace MonitorBot.Infrastructure.Checkout
             {
                 var html = await client.GetStringAsync(productUrl, ct);
 
-                // Extract CSRF token from inline JSON
                 string? csrf = null;
                 var csrfMatch = CsrfRegex.Match(html);
                 if (csrfMatch.Success) csrf = csrfMatch.Groups[1].Value;
 
-                // Cart ID � Walmart embeds a guest GUID we can generate ourselves
+                // Walmart guest cart ID is a client-generated GUID
                 var cartId = Guid.NewGuid().ToString("N");
 
                 return (csrf, cartId);
@@ -247,7 +263,7 @@ namespace MonitorBot.Infrastructure.Checkout
             HttpClient client, string cartId, UserProfile profile,
             string? csrfToken, CancellationToken ct)
         {
-            var url = $"https://www.walmart.com/api/v3/checkout/guest/contract";
+            var url = "https://www.walmart.com/api/v3/checkout/guest/contract";
 
             var addr = profile.ShippingAddress;
             var payload = new JObject
@@ -262,14 +278,14 @@ namespace MonitorBot.Infrastructure.Checkout
                 },
                 ["shippingAddress"] = new JObject
                 {
-                    ["firstName"]  = profile.FirstName,
-                    ["lastName"]   = profile.LastName,
+                    ["firstName"]      = profile.FirstName,
+                    ["lastName"]       = profile.LastName,
                     ["addressLineOne"] = addr.Line1,
                     ["addressLineTwo"] = addr.Line2,
-                    ["city"]       = addr.City,
-                    ["state"]      = addr.State,
-                    ["postalCode"] = addr.ZipCode,
-                    ["country"]    = addr.Country.Length == 2 ? addr.Country : "US"
+                    ["city"]           = addr.City,
+                    ["state"]          = addr.State,
+                    ["postalCode"]     = addr.ZipCode,
+                    ["country"]        = addr.Country.Length == 2 ? addr.Country : "US"
                 }
             };
 
@@ -364,12 +380,12 @@ namespace MonitorBot.Infrastructure.Checkout
         {
             if (string.IsNullOrWhiteSpace(number)) return "VISA";
             var n = number.Replace(" ", "");
-            if (n.StartsWith("4"))           return "VISA";
+            if (n.StartsWith("4"))                                          return "VISA";
             if (n.StartsWith("51") || n.StartsWith("52") ||
                 n.StartsWith("53") || n.StartsWith("54") ||
-                n.StartsWith("55") || n.StartsWith("2"))  return "MASTERCARD";
-            if (n.StartsWith("34") || n.StartsWith("37")) return "AMEX";
-            if (n.StartsWith("6011") || n.StartsWith("65")) return "DISCOVER";
+                n.StartsWith("55") || n.StartsWith("2"))                    return "MASTERCARD";
+            if (n.StartsWith("34") || n.StartsWith("37"))                   return "AMEX";
+            if (n.StartsWith("6011") || n.StartsWith("65"))                 return "DISCOVER";
             return "VISA";
         }
     }

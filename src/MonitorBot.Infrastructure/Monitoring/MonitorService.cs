@@ -193,7 +193,10 @@ namespace MonitorBot.Infrastructure.Monitoring
                         account.Name, account.Email);
             }
 
-            var checkoutResult = await _checkout.CheckoutAsync(task, profile, account, monitorResult, ct);
+            var checkoutResult = await _checkout.CheckoutAsync(
+                task, profile, account, monitorResult,
+                phase => UpdateStatus(task, phase),
+                ct);
 
             task.CheckoutStatus = checkoutResult.Status;
             task.LastOrderId    = checkoutResult.OrderId;

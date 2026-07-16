@@ -3,181 +3,715 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:MonitorBot.App.ViewModels">
     <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="320"/>
-        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <!-- Header bar (product name + task count) -->
+            <RowDefinition Height="52"/>
+            <!-- Sub-toolbar (Groups bar + search + task count) -->
+            <RowDefinition Height="40"/>
+            <!-- Main body -->
+            <RowDefinition Height="*"/>
+            <!-- Editor drawer -->
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-        <!-- Left: Task List -->
-        <DockPanel Grid.Column="0" Margin="24,24,12,24">
+        <!-- ?? Row 0: Header ?????????????????????????????????????????????????? -->
+        <Border Grid.Row="0"
+                Background="{StaticResource BgPanel}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                Padding="20,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
 
-            <!-- Toolbar -->
-            <StackPanel DockPanel.Dock="Top" Style="{StaticResource Toolbar}">
-                <TextBlock Text="Tasks" Style="{StaticResource TextH1}" VerticalAlignment="Center"
-                           Margin="0,0,16,0"/>
-                <Button Content="+ Add" Style="{StaticResource PrimaryButton}"
-                        Command="{Binding AddCommand}" Margin="0,0,6,0"/>
-                <Button Content="? Start" Style="{StaticResource SuccessButton}"
-                        Command="{Binding StartCommand}" Margin="0,0,6,0"/>
-                <Button Content="? Stop" Style="{StaticResource SecondaryButton}"
-                        Command="{Binding StopCommand}" Margin="0,0,6,0"/>
-                <Button Content="?? All" Style="{StaticResource SuccessButton}"
-                        Command="{Binding StartAllCommand}" Margin="0,0,6,0"/>
-                <Button Content="?? All" Style="{StaticResource SecondaryButton}"
-                        Command="{Binding StopAllCommand}" Margin="0,0,6,0"/>
-                <Button Content="?? Delete" Style="{StaticResource DangerButton}"
-                        Command="{Binding DeleteCommand}"/>
-            </StackPanel>
+                <!-- Product / group title -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- Group icon placeholder -->
+                    <Border Width="34" Height="34" CornerRadius="6"
+                            Background="{StaticResource BgCard}"
+                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            Margin="0,0,12,0">
+                        <TextBlock Text="&#x25A2;" FontSize="16" Foreground="{StaticResource TextMuted}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{Binding HeaderTitle}" FontSize="14" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimary}"/>
+                        <TextBlock Text="{Binding HeaderSubtitle}" Style="{StaticResource TextCaption}"
+                                   Margin="0,2,0,0"/>
+                    </StackPanel>
+                </StackPanel>
 
-            <!-- Grid -->
-            <DataGrid ItemsSource="{Binding Tasks}"
-                      SelectedItem="{Binding Selected, Mode=TwoWay}"
-                      IsReadOnly="True"
-                      SelectionUnit="FullRow"
-                      DockPanel.Dock="Top">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"                               Width="*"/>
-                    <DataGridTextColumn Header="TYPE"     Binding="{Binding Type}"                               Width="80"/>
-                    <DataGridTextColumn Header="INTERVAL" Binding="{Binding IntervalSeconds, StringFormat={}{0}s}" Width="70"/>
-                    <DataGridTemplateColumn Header="STATUS" Width="100">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <Border Style="{StaticResource StatusBadge}"
-                                        Background="{Binding StatusColor}"
-                                        HorizontalAlignment="Left"
-                                        Margin="4,6">
-                                    <TextBlock Text="{Binding Status}" FontSize="10" FontWeight="SemiBold"
-                                               Foreground="White"/>
+                <!-- Action buttons: Add | Start | Stop | Edit | Clear -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- Add -->
+                    <StackPanel Margin="0,0,6,0" HorizontalAlignment="Center">
+                        <Button Width="34" Height="34" Padding="0"
+                                Background="#3B82F6" BorderThickness="0"
+                                Command="{Binding AddCommand}"
+                                ToolTip="Add task to group">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                            CornerRadius="8">
+                                        <TextBlock Text="+" FontSize="20" FontWeight="Bold"
+                                                   Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#2563EB"/>
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.4"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="Add" Style="{StaticResource TextCaption}"
+                                   HorizontalAlignment="Center" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <!-- Start -->
+                    <StackPanel Margin="0,0,6,0" HorizontalAlignment="Center">
+                        <Button Width="34" Height="34" Padding="0"
+                                Background="#22C55E" BorderThickness="0"
+                                Command="{Binding StartAllCommand}"
+                                ToolTip="Start all tasks">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8">
+                                        <TextBlock Text="&#x25BA;" FontSize="12" Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#16A34A"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="Start" Style="{StaticResource TextCaption}"
+                                   HorizontalAlignment="Center" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <!-- Stop -->
+                    <StackPanel Margin="0,0,6,0" HorizontalAlignment="Center">
+                        <Button Width="34" Height="34" Padding="0"
+                                Background="#F97316" BorderThickness="0"
+                                Command="{Binding StopAllCommand}"
+                                ToolTip="Stop all tasks">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8">
+                                        <TextBlock Text="&#x25A0;" FontSize="11" Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#EA580C"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="Stop" Style="{StaticResource TextCaption}"
+                                   HorizontalAlignment="Center" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <!-- Edit -->
+                    <StackPanel Margin="0,0,6,0" HorizontalAlignment="Center">
+                        <Button Width="34" Height="34" Padding="0"
+                                Background="#8B5CF6" BorderThickness="0"
+                                Command="{Binding EditGroupCommand}"
+                                ToolTip="Edit group">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8">
+                                        <TextBlock Text="&#x270E;" FontSize="14" Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#7C3AED"/>
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.4"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="Edit" Style="{StaticResource TextCaption}"
+                                   HorizontalAlignment="Center" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <!-- Clear -->
+                    <StackPanel Margin="0,0,20,0" HorizontalAlignment="Center">
+                        <Button Width="34" Height="34" Padding="0"
+                                Background="#EF4444" BorderThickness="0"
+                                Command="{Binding DeleteCommand}"
+                                ToolTip="Clear all tasks in group">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8">
+                                        <TextBlock Text="&#x2715;" FontSize="13" Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#DC2626"/>
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.4"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock Text="Clear" Style="{StaticResource TextCaption}"
+                                   HorizontalAlignment="Center" Margin="0,3,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ?? Row 1: Sub-toolbar (Groups / All / search / task count) ???????? -->
+        <Border Grid.Row="1"
+                Background="{StaticResource BgPanel}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                Padding="12,0">
+            <DockPanel VerticalAlignment="Center">
+                <!-- "Groups" label + "+" new group button -->
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center"
+                            Margin="0,0,16,0">
+                    <TextBlock Text="Groups" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"
+                               Margin="0,0,6,0"/>
+                    <Button Width="20" Height="20" Padding="0"
+                            Command="{Binding NewGroupCommand}"
+                            ToolTip="Create new task group">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="Bd" Background="{StaticResource BgCard}"
+                                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                        CornerRadius="4">
+                                    <TextBlock Text="+" FontSize="13" Foreground="{StaticResource TextSecondary}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="LAST RESULT" Binding="{Binding LastResult}"                       Width="100"/>
-                    <DataGridTextColumn Header="LAST CHECK"  Binding="{Binding LastChecked, StringFormat={}{0:HH:mm:ss}}" Width="80"/>
-                </DataGrid.Columns>
-            </DataGrid>
-        </DockPanel>
-
-        <!-- Divider -->
-        <Rectangle Grid.Column="0" Width="1" HorizontalAlignment="Right"
-                   Fill="{StaticResource Border}"/>
-
-        <!-- Right: Task Editor -->
-        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel Margin="16,24,24,24"
-                        IsEnabled="{Binding Selected, Converter={StaticResource NullToBool}}">
-                <TextBlock Text="Edit Task" Style="{StaticResource TextH2}" Margin="0,0,0,16"/>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Name" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.Name, UpdateSourceTrigger=PropertyChanged}"/>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                        <Setter TargetName="Bd" Property="Background" Value="#00C8FF14"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
                 </StackPanel>
 
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Target URL" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.TargetUrl, UpdateSourceTrigger=PropertyChanged}"/>
-                </StackPanel>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Monitor Type" Style="{StaticResource TextLabel}"/>
-                    <ComboBox SelectedItem="{Binding Selected.Type}"
-                              ItemsSource="{Binding Source={StaticResource MonitorTypeValues}}"/>
-                </StackPanel>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Detection Mode" Style="{StaticResource TextLabel}"/>
-                    <ComboBox SelectedItem="{Binding Selected.DetectionMode}"
-                              ItemsSource="{Binding Source={StaticResource DetectionModeValues}}"/>
-                </StackPanel>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="SKU (optional)" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.Sku, UpdateSourceTrigger=PropertyChanged}"/>
-                </StackPanel>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Keyword (optional)" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.Keyword, UpdateSourceTrigger=PropertyChanged}"/>
-                </StackPanel>
-
-                <!-- Profile assignment -->
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Profile" Style="{StaticResource TextLabel}"/>
-                    <ComboBox ItemsSource="{Binding DataContext.Profiles, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                              SelectedItem="{Binding DataContext.SelectedProfile, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=UserControl}}">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding Name}"/>
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
-                </StackPanel>
-
-                <!-- Account assignment -->
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Account (optional)" Style="{StaticResource TextLabel}"/>
-                    <ComboBox ItemsSource="{Binding DataContext.Accounts, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                              SelectedItem="{Binding DataContext.SelectedAccount, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=UserControl}}">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding Name}"/>
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
-                </StackPanel>
-
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Price Threshold ($)" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.PriceThreshold, UpdateSourceTrigger=PropertyChanged}"/>
-                </StackPanel>
-
-                <Grid Margin="0,0,0,12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition/>
-                        <ColumnDefinition Width="8"/>
-                        <ColumnDefinition/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0">
-                        <TextBlock Text="Interval (s)" Style="{StaticResource TextLabel}"/>
-                        <TextBox Text="{Binding Selected.IntervalSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+                <!-- All filter dropdown -->
+                <Border DockPanel.Dock="Left" Background="{StaticResource BgCard}"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        CornerRadius="5" Padding="10,4" Margin="0,0,8,0" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="All" FontSize="12" Foreground="{StaticResource TextSecondary}"
+                                   Margin="0,0,6,0"/>
+                        <TextBlock Text="&#x25BC;" FontSize="8" Foreground="{StaticResource TextMuted}"
+                                   VerticalAlignment="Center"/>
                     </StackPanel>
-                    <StackPanel Grid.Column="2">
-                        <TextBlock Text="Max Retries" Style="{StaticResource TextLabel}"/>
-                        <TextBox Text="{Binding Selected.MaxRetries, UpdateSourceTrigger=PropertyChanged}"/>
-                    </StackPanel>
-                </Grid>
+                </Border>
 
-                <CheckBox Content="Enabled"       IsChecked="{Binding Selected.IsEnabled}"    Margin="0,0,0,8"/>
-                <CheckBox Content="Auto Checkout" IsChecked="{Binding Selected.AutoCheckout}" Margin="0,0,0,16"
-                          ToolTip="Automatically checkout when item is detected in stock"/>
+                <!-- Group count -->
+                <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="12"
+                           Foreground="{StaticResource TextMuted}" Margin="0,0,16,0">
+                    <Run Text="{Binding Groups.Count, Mode=OneWay}"/>
+                    <Run Text="groups"/>
+                </TextBlock>
 
-                <StackPanel Style="{StaticResource FormRow}">
-                    <TextBlock Text="Quantity" Style="{StaticResource TextLabel}"/>
-                    <TextBox Text="{Binding Selected.Quantity, UpdateSourceTrigger=PropertyChanged}" Width="60" HorizontalAlignment="Left"/>
-                </StackPanel>
-
-                <!-- Checkout Status -->
-                <StackPanel Margin="0,8,0,0"
-                            Visibility="{Binding Selected.AutoCheckout, Converter={StaticResource BoolToVisibility}}">
-                    <TextBlock Text="Checkout Status" Style="{StaticResource TextLabel}"/>
-                    <TextBlock Text="{Binding Selected.CheckoutStatus}" FontWeight="SemiBold"
+                <!-- Tasks tab button -->
+                <Border DockPanel.Dock="Left" Margin="0,0,16,0" VerticalAlignment="Center"
+                        BorderBrush="{StaticResource Accent}" BorderThickness="0,0,0,2" Padding="2,0,2,4">
+                    <TextBlock Text="Tasks" FontSize="12" FontWeight="SemiBold"
                                Foreground="{StaticResource Accent}"/>
-                    <TextBlock Text="{Binding Selected.LastOrderId, StringFormat='Order ID: {0}'}"
-                               Style="{StaticResource TextCaption}" Margin="0,2,0,0"/>
-                    <TextBlock Text="{Binding Selected.CheckoutError}"
-                               Foreground="{StaticResource Danger}"
-                               Style="{StaticResource TextCaption}" Margin="0,2,0,0"
-                               TextWrapping="Wrap"/>
-                </StackPanel>
+                </Border>
 
-                <!-- Save button -->
-                <Button Content="Save Task"
-                        Style="{StaticResource PrimaryButton}"
-                        Command="{Binding SaveCommand}"
-                        Margin="0,16,0,0"
-                        HorizontalAlignment="Left"/>
+                <!-- Search box -->
+                <TextBox DockPanel.Dock="Left" Width="180" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                         Tag="Search for tasks..." VerticalAlignment="Center" Height="26" Padding="8,4"/>
 
-            </StackPanel>
-        </ScrollViewer>
+                <!-- task count (right-aligned) -->
+                <TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" FontSize="12"
+                           Foreground="{StaticResource TextMuted}" HorizontalAlignment="Right">
+                    <Run Text="{Binding Tasks.Count, Mode=OneWay}"/>
+                    <Run Text="tasks"/>
+                </TextBlock>
+            </DockPanel>
+        </Border>
+
+        <!-- ?? Row 2: Main body (groups panel + task table) ??????????????????? -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ?? Left: Group list panel ???????????????????????????????????? -->
+            <Border Grid.Column="0" Background="{StaticResource BgPanel}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Group items -->
+                    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="8,8,8,0">
+                            <ItemsControl ItemsSource="{Binding Groups}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type vm:TaskGroupViewModel}">
+                                        <Border x:Name="GroupBtn" Margin="0,1" Padding="10,8"
+                                                CornerRadius="6" Cursor="Hand"
+                                                Background="Transparent">
+                                            <Border.InputBindings>
+                                                <MouseBinding MouseAction="LeftClick"
+                                                              Command="{Binding DataContext.SelectGroupCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                              CommandParameter="{Binding}"/>
+                                            </Border.InputBindings>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" FontSize="13"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimary}"/>
+                                                <TextBlock FontSize="11" Foreground="{StaticResource TextMuted}"
+                                                           Margin="0,2,0,0">
+                                                    <Run Text="{Binding TaskCount, Mode=OneWay}"/>
+                                                    <Run Text="Tasks"/>
+                                                    <Run Text=" � "/>
+                                                    <Run Text="{Binding Site}"/>
+                                                </TextBlock>
+                                            </StackPanel>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                <Setter TargetName="GroupBtn" Property="Background" Value="#00C8FF14"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- Empty state -->
+                            <TextBlock Text="No groups, please create a new group."
+                                       Style="{StaticResource TextCaption}"
+                                       HorizontalAlignment="Center" TextAlignment="Center"
+                                       TextWrapping="Wrap" Margin="8,24"
+                                       Visibility="{Binding Groups.Count,
+                                           Converter={StaticResource ZeroToVisibility}}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <!-- ?? Right: Task table ????????????????????????????????????????? -->
+            <Grid Grid.Column="1">
+                <!-- Column headers -->
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="36"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="{StaticResource BgPanel}"
+                        BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                        Padding="16,0">
+                    <Grid VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="28"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="120"/>
+                            <ColumnDefinition Width="100"/>
+                        </Grid.ColumnDefinitions>
+                        <CheckBox Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1" Text="PROFILE" Style="{StaticResource TextLabel}" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="2" Text="PROXY LIST" Style="{StaticResource TextLabel}" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="3" Text="ACCOUNT" Style="{StaticResource TextLabel}" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="4" Text="STATUS" Style="{StaticResource TextLabel}" VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+
+                <!-- Task rows -->
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <Grid>
+                        <!-- Empty state shown when no tasks and no group selected or group is empty -->
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                    Visibility="{Binding Tasks.Count,
+                                        Converter={StaticResource ZeroToVisibility}}">
+                            <TextBlock Text="&#x1F4C2;" FontSize="32" HorizontalAlignment="Center"
+                                       Margin="0,0,0,8"/>
+                            <TextBlock Text="No tasks." Style="{StaticResource TextCaption}"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+
+                        <ItemsControl ItemsSource="{Binding Tasks}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:MonitorTaskViewModel}">
+                                    <Border x:Name="RowBorder"
+                                            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                                            Padding="16,0" Height="46" Cursor="Hand"
+                                            Background="Transparent">
+                                        <Border.InputBindings>
+                                            <MouseBinding MouseAction="LeftClick"
+                                                          Command="{Binding DataContext.SelectCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                          CommandParameter="{Binding}"/>
+                                        </Border.InputBindings>
+                                        <Grid VerticalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="28"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="160"/>
+                                                <ColumnDefinition Width="120"/>
+                                                <ColumnDefinition Width="100"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <!-- Checkbox -->
+                                            <CheckBox Grid.Column="0" VerticalAlignment="Center"/>
+
+                                            <!-- Profile name (task name as fallback) -->
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Ellipse Width="7" Height="7" Margin="0,0,8,0"
+                                                         Fill="{Binding StatusColor}"/>
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                            </StackPanel>
+
+                                            <!-- Proxy List placeholder -->
+                                            <TextBlock Grid.Column="2" Text="�"
+                                                       Foreground="{StaticResource TextMuted}"
+                                                       VerticalAlignment="Center" FontSize="12"/>
+
+                                            <!-- Account placeholder -->
+                                            <TextBlock Grid.Column="3"
+                                                       Foreground="{StaticResource TextSecondary}"
+                                                       VerticalAlignment="Center" FontSize="12"
+                                                       Text="{Binding AccountId, TargetNullValue='�'}"/>
+
+                                            <!-- Status badge -->
+                                            <Border Grid.Column="4" VerticalAlignment="Center"
+                                                    Background="{Binding StatusColor,
+                                                        Converter={StaticResource StatusBgConverter}}"
+                                                    CornerRadius="4" Padding="8,3" HorizontalAlignment="Left">
+                                                <TextBlock Text="{Binding StatusLabel}" FontSize="11"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{Binding StatusColor}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+
+        <!-- ?? Row 3: Editor Drawer ???????????????????????????????????????????? -->
+        <Border Grid.Row="3"
+                Background="{StaticResource BgCard}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                Visibility="{Binding Selected, Converter={StaticResource NullToVisibility},
+                    FallbackValue=Collapsed}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Drawer header: section title + close button -->
+                <Border Grid.Row="0" Padding="24,8,8,8"
+                        BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <TextBlock Text="Edit Task" FontSize="12" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextSecondary}"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <!-- Delete this task -->
+                            <Button Margin="0,0,6,0" VerticalAlignment="Center"
+                                    Style="{StaticResource IconButton}"
+                                    Foreground="#EF4444"
+                                    Content="&#x1F5D1;"
+                                    FontSize="14"
+                                    ToolTip="Delete this task"
+                                    Command="{Binding DeleteTaskCommand}"/>
+                            <Button VerticalAlignment="Center"
+                                    Style="{StaticResource IconButton}" Content="&#x2715;"
+                                    Command="{Binding DeselectCommand}"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <StackPanel Orientation="Horizontal" Margin="24,16,24,16">
+
+                        <!-- Task Info -->
+                        <StackPanel Width="220" Margin="0,0,24,0">
+                            <TextBlock Text="TASK INFO" Style="{StaticResource TextLabel}" Margin="0,0,0,10"/>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="NAME" Style="{StaticResource TextLabel}"/>
+                                <TextBox Text="{Binding Selected.Name, UpdateSourceTrigger=PropertyChanged}"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="TARGET URL" Style="{StaticResource TextLabel}"/>
+                                <TextBox Text="{Binding Selected.TargetUrl, UpdateSourceTrigger=PropertyChanged}"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="SKU (optional)" Style="{StaticResource TextLabel}"/>
+                                <TextBox Text="{Binding Selected.Sku, UpdateSourceTrigger=PropertyChanged}"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <Rectangle Width="1" Fill="{StaticResource Border}" Margin="0,0,24,0"/>
+
+                        <!-- Monitor -->
+                        <StackPanel Width="200" Margin="0,0,24,0">
+                            <TextBlock Text="MONITOR" Style="{StaticResource TextLabel}" Margin="0,0,0,10"/>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="TYPE" Style="{StaticResource TextLabel}"/>
+                                <ComboBox SelectedItem="{Binding Selected.Type}"
+                                          ItemsSource="{Binding Source={StaticResource MonitorTypeValues}}"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="DETECTION MODE" Style="{StaticResource TextLabel}"/>
+                                <ComboBox SelectedItem="{Binding Selected.DetectionMode}"
+                                          ItemsSource="{Binding Source={StaticResource DetectionModeValues}}"/>
+                            </StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition/><ColumnDefinition Width="8"/><ColumnDefinition/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="INTERVAL (S)" Style="{StaticResource TextLabel}"/>
+                                    <TextBox Text="{Binding Selected.IntervalSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="RETRIES" Style="{StaticResource TextLabel}"/>
+                                    <TextBox Text="{Binding Selected.MaxRetries, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+
+                        <Rectangle Width="1" Fill="{StaticResource Border}" Margin="0,0,24,0"/>
+
+                        <!-- Assignment -->
+                        <StackPanel Width="200" Margin="0,0,24,0">
+                            <TextBlock Text="ASSIGNMENT" Style="{StaticResource TextLabel}" Margin="0,0,0,10"/>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="PROFILE" Style="{StaticResource TextLabel}"/>
+                                <ComboBox ItemsSource="{Binding DataContext.Profiles,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding DataContext.SelectedProfile, Mode=TwoWay,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate><TextBlock Text="{Binding Name}"/></DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="ACCOUNT (optional)" Style="{StaticResource TextLabel}"/>
+                                <ComboBox ItemsSource="{Binding DataContext.Accounts,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding DataContext.SelectedAccount, Mode=TwoWay,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate><TextBlock Text="{Binding Name}"/></DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <Rectangle Width="1" Fill="{StaticResource Border}" Margin="0,0,24,0"/>
+
+                        <!-- Checkout + Save -->
+                        <StackPanel Width="190" Margin="0,0,24,0">
+                            <TextBlock Text="CHECKOUT" Style="{StaticResource TextLabel}" Margin="0,0,0,10"/>
+                            <CheckBox Content="Auto Checkout" IsChecked="{Binding Selected.AutoCheckout}"
+                                      Margin="0,0,0,10"/>                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="QUANTITY (1–10)" Style="{StaticResource TextLabel}"/>
+                                <!-- +/- stepper matching RefractBot style -->
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Background="{StaticResource BgPanel}"
+                                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                            CornerRadius="6">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Width="26" Height="26" Padding="0"
+                                                    Background="Transparent" BorderThickness="0"
+                                                    Command="{Binding DataContext.DecrementQtyCommand,
+                                                        RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    ToolTip="Decrease quantity">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="5,0,0,5">
+                                                            <TextBlock Text="−" FontSize="14" FontWeight="Bold"
+                                                                       Foreground="{StaticResource TextSecondary}"
+                                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgCard}"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                            <TextBox Width="38" Height="26"
+                                                     Background="#1C1C26"
+                                                     Foreground="#E8E8F0"
+                                                     CaretBrush="#00C8FF"
+                                                     SelectionBrush="#00C8FF"
+                                                     BorderThickness="0"
+                                                     FontSize="13" FontWeight="SemiBold"
+                                                     TextAlignment="Center"
+                                                     VerticalContentAlignment="Center"
+                                                     Text="{Binding Selected.Quantity,
+                                                         UpdateSourceTrigger=PropertyChanged}">
+                                                <TextBox.Template>
+                                                    <ControlTemplate TargetType="TextBox">
+                                                        <Border Background="{TemplateBinding Background}"
+                                                                BorderBrush="#22222E" BorderThickness="1,0"
+                                                                Padding="0">
+                                                            <ScrollViewer x:Name="PART_ContentHost"
+                                                                          HorizontalAlignment="Center"
+                                                                          VerticalAlignment="Center"/>
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </TextBox.Template>
+                                            </TextBox>
+                                            <Button Width="26" Height="26" Padding="0"
+                                                    Background="Transparent" BorderThickness="0"
+                                                    Command="{Binding DataContext.IncrementQtyCommand,
+                                                        RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    ToolTip="Increase quantity">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="0,5,5,0">
+                                                            <TextBlock Text="+" FontSize="14" FontWeight="Bold"
+                                                                       Foreground="{StaticResource TextSecondary}"
+                                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgCard}"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </StackPanel>
+                            <CheckBox Content="Enabled" IsChecked="{Binding Selected.IsEnabled}" Margin="0,0,0,16"/>
+                            <Button Content="Save Task" Style="{StaticResource PrimaryButton}"
+                                    Command="{Binding SaveCommand}" HorizontalAlignment="Left"/>
+                        </StackPanel>
+
+                        <Rectangle Width="1" Fill="{StaticResource Border}" Margin="0,0,24,0"/>
+
+                        <!-- Cookie Injection -->
+                        <StackPanel Width="260">
+                            <TextBlock Text="COOKIE INJECTION" Style="{StaticResource TextLabel}" Margin="0,0,0,6"/>
+                            <TextBlock TextWrapping="Wrap" FontSize="10"
+                                       Foreground="{StaticResource TextMuted}" Margin="0,0,0,8">
+                                Auto-harvest opens a real browser — log in, then cookies are applied automatically.
+                            </TextBlock>
+
+                            <!-- Harvest button — primary action -->
+                            <Button Height="30" Margin="0,0,0,8"
+                                    Background="#00C8FF" BorderThickness="0"
+                                    Command="{Binding DataContext.HarvestCookiesCommand,
+                                        RelativeSource={RelativeSource AncestorType=UserControl}}">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                                CornerRadius="6">
+                                            <TextBlock Text="&#x1F30D;  Auto-Harvest Cookies"
+                                                       FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="#0A0A0F"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#00A8D8"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter Property="Opacity" Value="0.4"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+
+                            <!-- Status: shows if cookies are loaded -->
+                            <Border CornerRadius="5" Padding="8,5" Margin="0,0,0,8"
+                                    Background="#16161E"
+                                    BorderBrush="{StaticResource Border}" BorderThickness="1">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center">
+                                        <Ellipse.Style>
+                                            <Style TargetType="Ellipse">
+                                                <Setter Property="Fill" Value="#EF4444"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding DataContext.Selected.HasCookies,
+                                                        RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                        Value="True">
+                                                        <Setter Property="Fill" Value="#22C55E"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Ellipse.Style>
+                                    </Ellipse>
+                                    <TextBlock FontSize="11" Foreground="{StaticResource TextSecondary}"
+                                               VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Text" Value="No cookies — harvest required"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding DataContext.Selected.HasCookies,
+                                                        RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                        Value="True">
+                                                        <Setter Property="Text" Value="Cookies ready &#x2713;"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Manual paste fallback (collapsed by default, expandable) -->
+                            <Expander Header="Paste manually instead" Foreground="{StaticResource TextMuted}"
+                                      FontSize="10">
+                                <StackPanel Margin="0,6,0,0">
+                                    <TextBox AcceptsReturn="True" TextWrapping="Wrap"
+                                             Height="70" VerticalScrollBarVisibility="Auto"
+                                             Text="{Binding Selected.CookieOverride,
+                                                 UpdateSourceTrigger=PropertyChanged}"
+                                             FontFamily="Consolas" FontSize="10"
+                                             ToolTip="Paste full Cookie: header value here"/>
+                                    <Button Content="Clear" Margin="0,4,0,0"
+                                            HorizontalAlignment="Left"
+                                            Style="{StaticResource IconButton}"
+                                            Foreground="#EF4444"
+                                            Command="{Binding DataContext.ClearCookiesCommand,
+                                                RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Border>
     </Grid>
 </UserControl>
