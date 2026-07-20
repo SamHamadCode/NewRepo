@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Input;
 using MonitorBot.App.Commands;
 using MonitorBot.Core.Interfaces;
@@ -23,12 +25,14 @@ namespace MonitorBot.App.ViewModels
 
         public ICommand RefreshCommand { get; }
         public ICommand ClearCommand { get; }
+        public ICommand CopyAllCommand { get; }
 
         public LogsViewModel(ILogStore logStore)
         {
             _logStore = logStore;
             RefreshCommand = new RelayCommand(Refresh);
             ClearCommand = new RelayCommand(Clear);
+            CopyAllCommand = new RelayCommand(CopyAll);
         }
 
         public void Refresh()
@@ -51,5 +55,14 @@ namespace MonitorBot.App.ViewModels
         }
 
         private void Clear() => Entries.Clear();
+
+        private void CopyAll()
+        {
+            if (Entries.Count == 0) return;
+            var sb = new StringBuilder();
+            foreach (var e in Entries)
+                sb.AppendLine($"{e.Timestamp:HH:mm:ss.fff}\t{e.Level}\t{e.Category}\t{e.Message}");
+            Clipboard.SetText(sb.ToString());
+        }
     }
 }
