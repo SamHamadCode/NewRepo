@@ -1,5 +1,7 @@
 using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -26,22 +28,40 @@ namespace MonitorBot.Infrastructure.Checkout
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<WalmartCheckoutService> _logger;
         private readonly WalmartLoginService _loginService;
+        private readonly ILogStore _logStore;
+        private readonly IWalmartBrowserStockChecker? _browser;
 
         private static readonly Regex ItemIdRegex = new(
             @"/ip/[^/]+/(\d+)", RegexOptions.Compiled);
         private static readonly Regex CsrfRegex = new(
             @"""csp""\s*:\s*\{[^}]*""token""\s*:\s*""([^""]+)""",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex NextDataRegex = new(
+            @"<script id=""__NEXT_DATA__"" type=""application/json"">([\s\S]*?)</script>",
+            RegexOptions.Compiled);
 
         public WalmartCheckoutService(
             IHttpClientFactory httpClientFactory,
             ILogger<WalmartCheckoutService> logger,
-            WalmartLoginService loginService)
+            WalmartLoginService loginService,
+            ILogStore logStore,
+            IWalmartBrowserStockChecker? browser = null)
         {
             _httpClientFactory = httpClientFactory;
             _logger = logger;
             _loginService = loginService;
+            _logStore = logStore;
+            _browser = browser;
         }
+
+        private void Log(string level, string message, string? taskId = null) =>
+            _logStore.Add(new LogEntry
+            {
+                Level    = level,
+                Category = "Checkout",
+                Message  = message,
+                TaskId   = taskId
+            });
 
         public async Task<CheckoutResult> CheckoutAsync(
             MonitorTask task,
@@ -89,20 +109,45 @@ namespace MonitorBot.Infrastructure.Checkout
 
                 using var client = BuildClient(sessionCookies, null);
 
-                // ?? Step 2: Add to cart ????????????????????????????????????
+                // ── Step 2: Add to cart ────────────────────────────────────
                 onStatus?.Invoke(MonitorTaskStatus.AddingToCart);
 
-                var itemId = ExtractItemId(task.TargetUrl);
+                // itemId: SKU field first, then extract from URL
+                var itemId = !string.IsNullOrWhiteSpace(task.Sku)
+                    ? task.Sku!.Trim()
+                    : ExtractItemId(task.TargetUrl ?? string.Empty);
+
                 if (string.IsNullOrEmpty(itemId))
                 {
                     result.Status = CheckoutStatus.Failed;
-                    result.ErrorMessage = "Could not extract Walmart item ID from URL.";
+                    result.ErrorMessage = "No item ID found. Enter the Walmart item ID in the SKU field (e.g. 5037629800).";
                     return result;
                 }
 
                 _logger.LogDebug("Walmart item ID: {ItemId}", itemId);
 
-                var (csrfToken, cartId) = await FetchTokensAsync(client, task.TargetUrl, ct);
+                // If OfferIdOverride is set we have everything we need — skip the page fetch entirely.
+                // FetchTokensAsync hits walmart.com over HTTP which gets 412/521 from Cloudflare.
+                string? csrfToken, cartId, offerId;
+                if (!string.IsNullOrWhiteSpace(task.OfferIdOverride))
+                {
+                    csrfToken = null;
+                    cartId    = Guid.NewGuid().ToString("N");
+                    offerId   = null; // OfferIdOverride used below as atcId
+                    Log("INFO", $"[Walmart] SKU+OfferID mode — skipping page fetch (cartId={cartId})");
+                }
+                else if (!string.IsNullOrWhiteSpace(task.TargetUrl))
+                {
+                    (csrfToken, cartId, offerId) = await FetchTokensAsync(client, task.TargetUrl, ct);
+                }
+                else
+                {
+                    csrfToken = null;
+                    cartId    = Guid.NewGuid().ToString("N");
+                    offerId   = null;
+                    Log("INFO", $"[Walmart] No URL or OfferID — proceeding with guest cartId={cartId}");
+                }
+
                 if (string.IsNullOrEmpty(cartId))
                 {
                     result.Status = CheckoutStatus.Failed;
@@ -110,38 +155,78 @@ namespace MonitorBot.Infrastructure.Checkout
                     return result;
                 }
 
-                var addedToCart = await AddToCartAsync(client, cartId, itemId, quantity, csrfToken, ct);
+                // Use real offerId from page if available, otherwise fall back to itemId
+                // Priority: manual OfferIdOverride > page-extracted offerId > numeric itemId
+                var atcId = !string.IsNullOrWhiteSpace(task.OfferIdOverride)
+                    ? task.OfferIdOverride!.Trim()
+                    : !string.IsNullOrEmpty(offerId) ? offerId : itemId;
+                Log("INFO", $"[Walmart] ATC id={atcId} (itemId={itemId})");
+
+                bool addedToCart;
+                // Browser ATC bypasses Cloudflare 521
+                if (_browser != null && !string.IsNullOrEmpty(atcId))
+                {
+                    Log("INFO", "[Walmart] Using browser ATC");
+                    var (browserCartId, atcErr) = await _browser.AddToCartAsync(itemId, atcId, quantity, ct);
+                    if (browserCartId != null)
+                    {
+                        cartId = browserCartId;
+                        addedToCart = true;
+                        Log("INFO", $"[Walmart] Browser ATC OK — cartId={cartId}");
+                    }
+                    else
+                    {
+                        Log("WARN", $"[Walmart] Browser ATC failed ({atcErr}) — falling back to HTTP");
+                        addedToCart = await AddToCartAsync(client, cartId!, atcId, quantity, csrfToken, ct);
+                    }
+                }
+                else
+                {
+                    addedToCart = await AddToCartAsync(client, cartId!, atcId, quantity, csrfToken, ct);
+                }
+
                 if (!addedToCart)
                 {
                     result.Status = CheckoutStatus.OutOfStock;
-                    result.ErrorMessage = "Add-to-cart failed � item may have sold out.";
+                    result.ErrorMessage = "Add-to-cart failed — item may have sold out.";
                     return result;
                 }
 
-                _logger.LogInformation("Added item {ItemId} �{Qty} to cart {CartId}", itemId, quantity, cartId);
+                Log("INFO", $"[Walmart] ATC OK — item={atcId} x{quantity} cartId={cartId}");
 
-                // ?? Step 3: Place order ????????????????????????????????????
+                // ── Step 3: Place order via browser (bypasses Cloudflare/PX 412) ──
                 onStatus?.Invoke(MonitorTaskStatus.PlacingOrder);
 
-                var contractId = await CreateContractAsync(client, cartId, profile, csrfToken, ct);
-                if (string.IsNullOrEmpty(contractId))
+                string? orderId;
+                if (_browser != null)
                 {
-                    result.Status = CheckoutStatus.Failed;
-                    result.ErrorMessage = "Failed to create checkout contract.";
-                    return result;
+                    var (browsOrderId, browsErr) = await _browser.BrowserCheckoutAsync(cartId!, profile, ct);
+                    if (!string.IsNullOrEmpty(browsOrderId))
+                    {
+                        orderId = browsOrderId;
+                    }
+                    else
+                    {
+                        Log("WARN", $"[Walmart] Browser checkout failed ({browsErr}) — falling back to HTTP");
+                        orderId = await PlaceOrderViaHttpAsync(client, cartId!, profile, csrfToken, ct);
+                    }
+                }
+                else
+                {
+                    orderId = await PlaceOrderViaHttpAsync(client, cartId!, profile, csrfToken, ct);
                 }
 
-                var orderId = await PlaceOrderAsync(client, contractId, profile, csrfToken, ct);
                 if (string.IsNullOrEmpty(orderId))
                 {
                     result.Status = CheckoutStatus.CardDeclined;
-                    result.ErrorMessage = "Order submission failed � check card details.";
+                    result.ErrorMessage = "Order submission failed — check card details.";
                     return result;
                 }
 
                 result.IsSuccess = true;
                 result.Status = CheckoutStatus.Success;
                 result.OrderId = orderId;
+                Log("INFO", $"[Walmart] Order placed! orderId={orderId}");
                 _logger.LogInformation("Walmart order placed! OrderId={OrderId}", orderId);
             }
             catch (OperationCanceledException)
@@ -153,6 +238,7 @@ namespace MonitorBot.Infrastructure.Checkout
             {
                 result.Status = CheckoutStatus.Failed;
                 result.ErrorMessage = ex.Message;
+                Log("WARN", $"[Walmart] Checkout error: {ex.Message}");
                 _logger.LogWarning(ex, "Checkout error for task {Name}", task.Name);
             }
 
@@ -199,7 +285,7 @@ namespace MonitorBot.Infrastructure.Checkout
             return m.Success ? m.Groups[1].Value : null;
         }
 
-        private async Task<(string? csrfToken, string? cartId)> FetchTokensAsync(
+        private async Task<(string? csrfToken, string? cartId, string? offerId)> FetchTokensAsync(
             HttpClient client, string productUrl, CancellationToken ct)
         {
             try
@@ -210,15 +296,54 @@ namespace MonitorBot.Infrastructure.Checkout
                 var csrfMatch = CsrfRegex.Match(html);
                 if (csrfMatch.Success) csrf = csrfMatch.Groups[1].Value;
 
+                // Extract offerId by parsing the __NEXT_DATA__ JSON block directly.
+                // Walmart embeds it in a <script id="__NEXT_DATA__"> tag.
+                string? offerId = null;
+                var ndMatch = NextDataRegex.Match(html);
+                if (ndMatch.Success)
+                {
+                    try
+                    {
+                        var nd = JObject.Parse(ndMatch.Groups[1].Value);
+                        // Try known paths in order of reliability
+                        offerId =
+                            nd.SelectToken("props.pageProps.initialData.data.product.offers.primary.offerId")?.ToString()
+                         ?? nd.SelectToken("props.pageProps.initialData.data.product.buyBox.products[0].offerId")?.ToString()
+                         ?? nd.SelectToken("props.pageProps.initialData.data.idml.offerId")?.ToString();
+
+                        // Last resort: collect ALL offerId values and pick the longest (most specific)
+                        if (string.IsNullOrEmpty(offerId))
+                        {
+                            var all = new System.Collections.Generic.List<string>();
+                            foreach (var t in nd.Descendants())
+                                if (t is JProperty p && p.Name == "offerId" && p.Value.Type == JTokenType.String)
+                                {
+                                    var v = p.Value.ToString();
+                                    if (v.Length >= 10) all.Add(v);
+                                }
+                            offerId = all.Count > 0
+                                ? all.OrderByDescending(x => x.Length).First()
+                                : null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to parse __NEXT_DATA__ for offerId");
+                    }
+                }
+
+                Log("INFO", $"[Walmart] Page fetched — csrf={(csrf != null ? "found" : "missing")} offerId={(offerId ?? "missing")}");
+
                 // Walmart guest cart ID is a client-generated GUID
                 var cartId = Guid.NewGuid().ToString("N");
 
-                return (csrf, cartId);
+                return (csrf, cartId, offerId);
             }
             catch (Exception ex)
             {
+                Log("WARN", $"[Walmart] Failed to fetch page tokens: {ex.Message}");
                 _logger.LogWarning(ex, "Failed to fetch Walmart tokens");
-                return (null, null);
+                return (null, null, null);
             }
         }
 
@@ -248,13 +373,15 @@ namespace MonitorBot.Infrastructure.Checkout
             AddApiHeaders(req, csrfToken);
 
             var resp = await client.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            var snippet = body.Length > 400 ? body[..400] : body;
             if (!resp.IsSuccessStatusCode)
             {
+                Log("WARN", $"[Walmart] ATC HTTP {(int)resp.StatusCode}: {snippet}");
                 _logger.LogWarning("Add-to-cart HTTP {Status}", (int)resp.StatusCode);
                 return false;
             }
 
-            var body = await resp.Content.ReadAsStringAsync(ct);
             var json = JObject.Parse(body);
             return json["cart"]?["count"]?.Value<int>() > 0;
         }
@@ -296,13 +423,15 @@ namespace MonitorBot.Infrastructure.Checkout
             AddApiHeaders(req, csrfToken);
 
             var resp = await client.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            var snippet = body.Length > 400 ? body[..400] : body;
             if (!resp.IsSuccessStatusCode)
             {
+                Log("WARN", $"[Walmart] Contract HTTP {(int)resp.StatusCode}: {snippet}");
                 _logger.LogWarning("Contract HTTP {Status}", (int)resp.StatusCode);
                 return null;
             }
 
-            var body = await resp.Content.ReadAsStringAsync(ct);
             var json = JObject.Parse(body);
             return json["contractId"]?.ToString();
         }
@@ -354,16 +483,30 @@ namespace MonitorBot.Infrastructure.Checkout
             AddApiHeaders(req, csrfToken);
 
             var resp = await client.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            var snippet = body.Length > 400 ? body[..400] : body;
             if (!resp.IsSuccessStatusCode)
             {
+                Log("WARN", $"[Walmart] PlaceOrder HTTP {(int)resp.StatusCode}: {snippet}");
                 _logger.LogWarning("Place-order HTTP {Status}", (int)resp.StatusCode);
                 return null;
             }
 
-            var body = await resp.Content.ReadAsStringAsync(ct);
+            Log("INFO", $"[Walmart] PlaceOrder response: {snippet}");
             var json = JObject.Parse(body);
             return json["order"]?["id"]?.ToString()
                 ?? json["orderId"]?.ToString();
+        }
+
+        /// <summary>HTTP fallback: contract then order in two HTTP calls.</summary>
+        private async Task<string?> PlaceOrderViaHttpAsync(
+            HttpClient client, string cartId, UserProfile profile,
+            string? csrfToken, CancellationToken ct)
+        {
+            var contractId = await CreateContractAsync(client, cartId, profile, csrfToken, ct);
+            if (string.IsNullOrEmpty(contractId)) return null;
+            Log("INFO", $"[Walmart] HTTP Contract: {contractId}");
+            return await PlaceOrderAsync(client, contractId, profile, csrfToken, ct);
         }
 
         private static void AddApiHeaders(HttpRequestMessage req, string? csrfToken)

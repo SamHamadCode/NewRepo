@@ -157,6 +157,7 @@ namespace MonitorBot.App.ViewModels
 
             _monitor.TaskStatusChanged += (_, t) => Application.Current.Dispatcher.Invoke(() => RefreshTask(t));
             _monitor.ResultReceived    += (_, r) => Application.Current.Dispatcher.Invoke(() => UpdateResult(r));
+            _monitor.ReHarvestRequested += (_, t) => Application.Current.Dispatcher.InvokeAsync(() => AutoHarvestAndRetryAsync(t));
         }
 
         // ?? Load ??????????????????????????????????????????????????????????????
@@ -193,7 +194,17 @@ namespace MonitorBot.App.ViewModels
             var groupTaskIds = new System.Collections.Generic.HashSet<string>(groupVm.Group.TaskIds);
 
             foreach (var t in allTasks.Where(x => groupTaskIds.Contains(x.Id.ToString())).OrderBy(x => x.CreatedAt))
+            {
+                // Reset any stale running/retrying status left over from a previous session
+                if (t.Status == MonitorTaskStatus.Running  ||
+                    t.Status == MonitorTaskStatus.Retrying ||
+                    t.Status == MonitorTaskStatus.CheckingOut)
+                {
+                    t.Status = MonitorTaskStatus.Idle;
+                    await _repo.SaveAsync(t);
+                }
                 Tasks.Add(new MonitorTaskViewModel(t));
+            }
 
             OnPropertyChanged(nameof(HeaderSubtitle));
         }
@@ -201,7 +212,9 @@ namespace MonitorBot.App.ViewModels
         // ?? Group CRUD ????????????????????????????????????????????????????????
         private async Task CreateGroupAsync()
         {
-            var dlg = new CreateTaskGroupDialog { Owner = Application.Current.MainWindow };
+            var dlg = new CreateTaskGroupDialog();
+            var main = Application.Current.MainWindow;
+            if (main != null && main.IsVisible) dlg.Owner = main;
             if (dlg.ShowDialog() != true) return;
 
             var group = new TaskGroup
@@ -220,7 +233,9 @@ namespace MonitorBot.App.ViewModels
         {
             if (SelectedGroup == null) return;
 
-            var dlg = new CreateTaskGroupDialog { Owner = Application.Current.MainWindow };
+            var dlg = new CreateTaskGroupDialog();
+            var main = Application.Current.MainWindow;
+            if (main != null && main.IsVisible) dlg.Owner = main;
             dlg.GroupNameBox.Text = SelectedGroup.Name;
             if (dlg.ShowDialog() != true) return;
 
@@ -309,6 +324,37 @@ namespace MonitorBot.App.ViewModels
             Tasks.Clear();
             Selected = null;
             OnPropertyChanged(nameof(HeaderSubtitle));
+        }
+
+        /// <summary>
+        /// Called automatically when a checkout fails due to expired cookies.
+        /// Opens the harvester window, saves the fresh cookies back to the task, then restarts monitoring.
+        /// </summary>
+        private async Task AutoHarvestAndRetryAsync(MonitorTask task)
+        {
+            // Determine harvest URL from the task's own URL
+            string startUrl;
+            try { startUrl = new Uri(task.TargetUrl).GetLeftPart(UriPartial.Authority); }
+            catch { startUrl = "https://www.target.com"; }
+
+            var win = new Views.CookieHarvesterWindow(startUrl);
+            var main = Application.Current.MainWindow;
+            if (main != null && main.IsVisible)
+                win.Owner = main;
+
+            if (win.ShowDialog() == true && !string.IsNullOrEmpty(win.HarvestedCookies))
+            {
+                task.CookieOverride = win.HarvestedCookies;
+                await _repo.SaveAsync(task);
+
+                // Refresh the VM so the editor drawer shows the new cookies
+                var vm = Tasks.FirstOrDefault(x => x.Task.Id == task.Id);
+                vm?.Refresh();
+
+                // Restart the monitor loop so it picks up the fresh cookies immediately
+                await _monitor.StopTaskAsync(task.Id);
+                await _monitor.StartTaskAsync(task);
+            }
         }
 
         private void OpenHarvester()
@@ -446,6 +492,12 @@ namespace MonitorBot.App.ViewModels
         {
             get => Task.Sku;
             set { Task.Sku = value; OnPropertyChanged(); }
+        }
+
+        public string? OfferIdOverride
+        {
+            get => Task.OfferIdOverride;
+            set { Task.OfferIdOverride = value; OnPropertyChanged(); }
         }
 
         public string? Keyword

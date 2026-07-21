@@ -10,6 +10,7 @@ namespace MonitorBot.Core.Models
         public MonitorType Type { get; set; }
         public string TargetUrl { get; set; } = string.Empty;
         public string? Sku { get; set; }
+        public string? OfferIdOverride { get; set; }  // Walmart offer ID — overrides auto-extraction from page
         public string? Keyword { get; set; }
         public DetectionMode DetectionMode { get; set; }
         public decimal? PriceThreshold { get; set; }

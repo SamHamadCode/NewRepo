@@ -83,8 +83,13 @@ namespace MonitorBot.Infrastructure.Monitoring
             {
                 var url = task.TargetUrl ?? "";
 
-                // Route known sites through HttpStockChecker (pure HTTP API, no browser)
-                if (url.Contains("target.com", StringComparison.OrdinalIgnoreCase)      ||
+                // Route known sites through HttpStockChecker (pure HTTP API, no browser).
+                // Also route Walmart tasks that have no URL but have SKU/OfferIdOverride set.
+                var isWalmartByIds = string.IsNullOrWhiteSpace(url)
+                    && (!string.IsNullOrWhiteSpace(task.Sku) || !string.IsNullOrWhiteSpace(task.OfferIdOverride));
+
+                if (isWalmartByIds                                                       ||
+                    url.Contains("target.com", StringComparison.OrdinalIgnoreCase)      ||
                     url.Contains("walmart.com", StringComparison.OrdinalIgnoreCase)      ||
                     url.Contains("bestbuy.com", StringComparison.OrdinalIgnoreCase)      ||
                     url.Contains("costco.com", StringComparison.OrdinalIgnoreCase)       ||

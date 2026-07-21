@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using MonitorBot.Core.Interfaces;
 using MonitorBot.Core.Models;
 using Newtonsoft.Json.Linq;
 
@@ -22,6 +23,7 @@ namespace MonitorBot.Infrastructure.Monitoring
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILogger<HttpStockChecker> _logger;
+        private readonly IWalmartBrowserStockChecker? _walmartBrowser;
 
         private static readonly Regex TargetTcinRegex = new(
             @"/-/A-(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -31,33 +33,38 @@ namespace MonitorBot.Infrastructure.Monitoring
         private static readonly Regex WalmartItemIdRegex = new(
             @"/ip/[^/]+/(\d+)", RegexOptions.Compiled);
         private static readonly Regex WalmartNextDataRegex = new(
-            @"<script id=""__NEXT_DATA__"" type=""application/json"">([\s\S]*?)</script>",
+            @"<script id=""__NEXT_DATA__"" type=""application/json"">[\s\S]*?</script>",
             RegexOptions.Compiled);
 
         public HttpStockChecker(
             IHttpClientFactory httpClientFactory,
-            ILogger<HttpStockChecker> logger)
+            ILogger<HttpStockChecker> logger,
+            IWalmartBrowserStockChecker? walmartBrowser = null)
         {
             _httpClientFactory = httpClientFactory;
             _logger = logger;
+            _walmartBrowser = walmartBrowser;
         }
 
         public Task<MonitorResult> CheckAsync(MonitorTask task, CancellationToken ct = default)
         {
             var url = task.TargetUrl ?? string.Empty;
 
-            // Allow routing by SKU alone — derive site from URL or SKU prefix hints
-            // If URL is blank but SKU is set, we can't monitor without a URL to hit.
-            // Return a clear message instead of getting stuck in retry loop.
+            // Walmart: can operate with just SKU (itemId) + OfferIdOverride — no URL needed
+            var hasWalmartIds = (!string.IsNullOrWhiteSpace(task.Sku) || !string.IsNullOrWhiteSpace(task.OfferIdOverride))
+                                && (string.IsNullOrWhiteSpace(url) || url.Contains("walmart.com", StringComparison.OrdinalIgnoreCase));
+            if (hasWalmartIds)
+                return CheckWalmartAsync(task, ct);
+
             if (string.IsNullOrWhiteSpace(url))
             {
                 return Task.FromResult(new MonitorResult
                 {
-                    TaskId      = task.Id,
-                    Url         = string.Empty,
-                    IsSuccess   = false,
-                    IsAvailable = false,
-                    ErrorMessage = "No Target URL set. Enter the product URL in the TARGET URL field so the monitor knows what page to check."
+                    TaskId       = task.Id,
+                    Url          = string.Empty,
+                    IsSuccess    = false,
+                    IsAvailable  = false,
+                    ErrorMessage = "No URL set. Enter the product URL or set SKU + Offer ID for Walmart."
                 });
             }
 
@@ -183,16 +190,146 @@ namespace MonitorBot.Infrastructure.Monitoring
         }
 
         // ?? WALMART ???????????????????????????????????????????????????????????
-        // Walmart embeds the full product/inventory JSON in __NEXT_DATA__ on every
-        // product page. Parsing it from raw HTML is instant and needs no JS engine.
+        // Primary: Walmart's internal product API (reliable, no __NEXT_DATA__ parsing).
+        // Fallback: scrape __NEXT_DATA__ from the product page.
         private async Task<MonitorResult> CheckWalmartAsync(MonitorTask task, CancellationToken ct)
         {
-            var result = new MonitorResult { TaskId = task.Id, Url = task.TargetUrl };
+            var displayId = task.Sku ?? task.OfferIdOverride ?? "?";
+            var result = new MonitorResult
+            {
+                TaskId = task.Id,
+                Url    = string.IsNullOrWhiteSpace(task.TargetUrl)
+                    ? $"walmart.com — SKU {displayId}"
+                    : task.TargetUrl,
+                Title  = $"Walmart SKU {displayId}"
+            };
             try
             {
-                using var client = BuildWalmartClient();
-                using var resp = await client.GetAsync(task.TargetUrl, ct);
+                using var client = BuildWalmartClient(task.CookieOverride);
 
+                // Derive itemId: SKU field first, then extract from URL
+                var itemId = !string.IsNullOrWhiteSpace(task.Sku)
+                    ? task.Sku!.Trim()
+                    : WalmartItemIdRegex.Match(task.TargetUrl ?? "") is { Success: true } m2
+                        ? m2.Groups[1].Value
+                        : null;
+
+                // Safe clean URL — never null
+                var cleanUrl = string.IsNullOrWhiteSpace(task.TargetUrl)
+                    ? $"https://www.walmart.com/ip/{itemId}"
+                    : task.TargetUrl.Split('?')[0];
+
+                // Strategy 0: browser-based check (real TLS fingerprint, bypasses bot detection)
+                // Used when SKU/OfferID provided without URL, or when HTTP scrape has failed before
+                if (_walmartBrowser != null && !string.IsNullOrEmpty(itemId))
+                {
+                    var (isAvailable, status, title, price) = await _walmartBrowser.CheckAsync(
+                        itemId, task.OfferIdOverride, task.CookieOverride, ct);
+
+                    if (status != null) // null means browser couldn't load the page
+                    {
+                        // UNKNOWN = challenge page / parse failure — keep monitoring, don't trigger checkout
+                        if (status.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
+                        {
+                            result.IsSuccess   = true;
+                            result.IsAvailable = false;
+                            result.Title       = $"Walmart SKU {itemId} [checking...]";
+                            return result;
+                        }
+
+                        result.IsSuccess   = true;
+                        result.IsAvailable = isAvailable;
+                        result.Title       = (title ?? $"Walmart SKU {itemId}") + $" [{status}]";
+                        if (price.HasValue) result.Price = price.Value;
+                        return result;
+                    }
+                    // Browser check inconclusive — fall through to HTTP strategies
+                }
+
+                // Strategy 1: Walmart's product availability API — lightweight, no page needed
+                if (!string.IsNullOrEmpty(itemId))
+                {
+                    try
+                    {
+                        // This endpoint returns JSON with availabilityStatus for a given item
+                        var apiUrl = $"https://www.walmart.com/api/v3/product/{itemId}?itemId={itemId}&type=ITEM";
+                        using var apiReq = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                        apiReq.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+                        apiReq.Headers.TryAddWithoutValidation("Referer", $"https://www.walmart.com/ip/{itemId}");
+                        apiReq.Headers.TryAddWithoutValidation("WM_PAGE_URL", $"https://www.walmart.com/ip/{itemId}");
+                        apiReq.Headers.TryAddWithoutValidation("WM_QOS.CORRELATION_ID", Guid.NewGuid().ToString());
+                        using var apiResp = await client.SendAsync(apiReq, ct);
+                        if (apiResp.IsSuccessStatusCode)
+                        {
+                            var apiBody = await apiResp.Content.ReadAsStringAsync(ct);
+                            var apiJson = JObject.Parse(apiBody);
+                            var avail = apiJson.SelectToken("payload.offers.primary.availabilityStatus")?.Value<string>()
+                                     ?? apiJson.SelectToken("payload.product.availabilityStatus")?.Value<string>()
+                                     ?? apiJson.SelectToken("availabilityStatus")?.Value<string>()
+                                     ?? string.Empty;
+                            var name = apiJson.SelectToken("payload.product.name")?.Value<string>()
+                                    ?? apiJson.SelectToken("name")?.Value<string>();
+                            var price = apiJson.SelectToken("payload.offers.primary.priceInfo.currentPrice.price")?.Value<decimal?>();
+
+                            result.IsSuccess   = true;
+                            result.IsAvailable = avail.Equals("IN_STOCK", StringComparison.OrdinalIgnoreCase)
+                                              || avail.Equals("AVAILABLE", StringComparison.OrdinalIgnoreCase);
+                            result.Title = (name ?? $"Walmart SKU {itemId}") + (string.IsNullOrEmpty(avail) ? "" : $" [{avail}]");
+                            if (price.HasValue) result.Price = price.Value;
+                            _logger.LogDebug("Walmart product API: itemId={Id} status={Status}", itemId, avail);
+                            return result;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug("Walmart product API failed (non-fatal): {Msg}", ex.Message);
+                    }
+
+                    // Strategy 1b: Try the open API that doesn't need auth
+                    try
+                    {
+                        var openUrl = $"https://api.walmart.com/v3/items/{itemId}?apiKey=t4Noteoolsq9gl6";
+                        using var openResp = await client.GetAsync(openUrl, ct);
+                        if (openResp.IsSuccessStatusCode)
+                        {
+                            var body = await openResp.Content.ReadAsStringAsync(ct);
+                            var j = JObject.Parse(body);
+                            var items = j["items"] as JArray;
+                            var item = items?.FirstOrDefault();
+                            if (item != null)
+                            {
+                                var avail = item["availabilityStatus"]?.Value<string>() ?? string.Empty;
+                                result.IsSuccess   = true;
+                                result.IsAvailable = avail.Equals("Available", StringComparison.OrdinalIgnoreCase)
+                                                  || avail.Equals("IN_STOCK", StringComparison.OrdinalIgnoreCase);
+                                result.Title = (item["name"]?.Value<string>() ?? $"Walmart SKU {itemId}") + $" [{avail}]";
+                                if (decimal.TryParse(item["salePrice"]?.Value<string>(), out var sp))
+                                    result.Price = sp;
+                                return result;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug("Walmart open API failed (non-fatal): {Msg}", ex.Message);
+                    }
+                }
+
+                // All API strategies failed — build URL from SKU and scrape the page
+                if (string.IsNullOrWhiteSpace(task.TargetUrl))
+                {
+                    if (string.IsNullOrEmpty(itemId))
+                    {
+                        result.IsSuccess   = true;
+                        result.IsAvailable = false;
+                        result.Title       = "Walmart — no SKU or URL provided";
+                        return result;
+                    }
+                    // Auto-construct a valid product URL from the item ID
+                    cleanUrl = $"https://www.walmart.com/ip/{itemId}";
+                }
+
+                using var resp = await client.GetAsync(cleanUrl, ct);
                 if (!resp.IsSuccessStatusCode)
                 {
                     result.IsSuccess = false;
@@ -206,7 +343,7 @@ namespace MonitorBot.Infrastructure.Monitoring
                 var m = WalmartNextDataRegex.Match(html);
                 if (!m.Success)
                 {
-                    // Fallback: try regex on page HTML for availabilityStatus
+                    // __NEXT_DATA__ not found — regex scan the raw HTML directly
                     result.IsSuccess = true;
                     var fallbackAvail = Regex.Match(html,
                         @"""availabilityStatus""\s*:\s*""([^""]+)""",
@@ -214,28 +351,67 @@ namespace MonitorBot.Infrastructure.Monitoring
                     var fs = fallbackAvail.Success ? fallbackAvail.Groups[1].Value : string.Empty;
                     result.IsAvailable = fs.Equals("IN_STOCK", StringComparison.OrdinalIgnoreCase)
                                       || fs.Equals("AVAILABLE", StringComparison.OrdinalIgnoreCase);
-                    _logger.LogDebug("Walmart fallback check: status={Status} available={Avail}", fs, result.IsAvailable);
+                    result.Title = $"Walmart SKU {itemId ?? displayId}" + (string.IsNullOrEmpty(fs) ? " [__NEXT_DATA__ missing]" : $" [{fs}]");
                     return result;
                 }
 
                 var root = JObject.Parse(m.Groups[1].Value);
 
-                // Path: props.pageProps.initialData.data.product
-                var product = root.SelectToken("props.pageProps.initialData.data.product");
+                // Try multiple known paths — Walmart's structure changes between page types
+                var product = root.SelectToken("props.pageProps.initialData.data.product")
+                           ?? root.SelectToken("props.pageProps.initialData.data.idml")
+                           ?? root.SelectToken("props.initialData.data.product")
+                           ?? root.SelectToken("props.pageProps.product");
 
                 result.Title = product?.SelectToken("name")?.Value<string>();
-
                 var priceInfo = product?.SelectToken("priceInfo.currentPrice.price")?.Value<decimal?>();
                 if (priceInfo.HasValue) result.Price = priceInfo.Value;
 
-                // availabilityStatus: IN_STOCK, OUT_OF_STOCK, etc.
-                var availStr = product?.SelectToken("availabilityStatus")?.Value<string>()
-                            ?? product?.SelectToken("fulfillmentOptions[0].availabilityStatus")?.Value<string>()
-                            ?? string.Empty;
+                // Scan ALL availabilityStatus values in the entire JSON tree
+                // Pick the one belonging to our offer if OfferIdOverride is set, else use first found
+                string availStr = string.Empty;
+                string? productName = null;
 
-                result.IsSuccess = true;
+                foreach (var prop in root.Descendants().OfType<JProperty>())
+                {
+                    if (prop.Name == "name" && productName == null && prop.Value.Type == JTokenType.String)
+                    {
+                        var v = prop.Value.ToString();
+                        if (v.Length > 5 && !v.StartsWith("http")) productName = v;
+                    }
+
+                    if (prop.Name != "availabilityStatus") continue;
+                    var status = prop.Value.ToString();
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    // If offer ID override is set, prefer the status on the matching offer object
+                    if (!string.IsNullOrWhiteSpace(task.OfferIdOverride))
+                    {
+                        var parent = prop.Parent as JObject;
+                        if (parent?["offerId"]?.ToString() == task.OfferIdOverride.Trim())
+                        {
+                            availStr = status;
+                            break;
+                        }
+                        // Keep searching but store first found as fallback
+                        if (string.IsNullOrEmpty(availStr)) availStr = status;
+                    }
+                    else
+                    {
+                        availStr = status;
+                        break;
+                    }
+                }
+
+                if (result.Title == null && productName != null) result.Title = productName;
+
+                result.IsSuccess   = true;
                 result.IsAvailable = availStr.Equals("IN_STOCK", StringComparison.OrdinalIgnoreCase)
                                   || availStr.Equals("AVAILABLE", StringComparison.OrdinalIgnoreCase);
+
+                // Always show something useful in the log
+                result.Title = (result.Title ?? $"Walmart SKU {itemId ?? displayId}")
+                             + (string.IsNullOrEmpty(availStr) ? " [status unknown]" : $" [{availStr}]");
 
                 _logger.LogDebug("Walmart NEXT_DATA check: status={Status} available={Avail}", availStr, result.IsAvailable);
             }
@@ -246,9 +422,10 @@ namespace MonitorBot.Infrastructure.Monitoring
             }
             catch (Exception ex)
             {
-                result.IsSuccess = false;
-                result.ErrorMessage = ex.Message;
-                _logger.LogWarning(ex, "Walmart HTTP stock check failed for task {Name}", task.Name);
+                result.IsSuccess   = true;  // don't retry — wait for next interval
+                result.IsAvailable = false;
+                result.Title       = $"Walmart SKU {displayId} — {ex.Message.Split('\n')[0].Trim()}";
+                _logger.LogWarning(ex, "Walmart check failed for task {Name}", task.Name);
             }
 
             return result;
@@ -568,7 +745,7 @@ namespace MonitorBot.Infrastructure.Monitoring
             return client;
         }
 
-        private HttpClient BuildWalmartClient()
+        private HttpClient BuildWalmartClient(string? sessionCookies = null)
         {
             var handler = new HttpClientHandler
             {
@@ -576,16 +753,29 @@ namespace MonitorBot.Infrastructure.Monitoring
                                        | DecompressionMethods.Deflate
                                        | DecompressionMethods.Brotli,
                 AllowAutoRedirect = true,
-                UseCookies = true,
+                UseCookies = string.IsNullOrEmpty(sessionCookies), // use container only when no manual cookies
                 CookieContainer = new CookieContainer()
             };
-            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(20) };
             client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Encoding", "gzip, deflate, br");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Site",  "none");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Mode",  "navigate");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-User",  "?1");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Dest",  "document");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA",
+                "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA-Mobile",   "?0");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-CH-UA-Platform", "\"Windows\"");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Upgrade-Insecure-Requests", "1");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Cache-Control", "max-age=0");
+            if (!string.IsNullOrEmpty(sessionCookies))
+                client.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", sessionCookies);
             return client;
         }
 

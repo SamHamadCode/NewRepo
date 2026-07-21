@@ -145,8 +145,13 @@ namespace MonitorBot.Infrastructure.Checkout
                 var (atcOk, cartId, atcError) = await AddToCartAsync(client, tcin, quantity, mergedCookies, ct);
                 if (!atcOk)
                 {
-                    result.Status       = CheckoutStatus.Failed;
-                    result.ErrorMessage = atcError;
+                    // 401 means the cookies have expired — signal the caller to re-harvest
+                    var needsReHarvest = atcError != null && atcError.Contains("401");
+                    result.Status          = CheckoutStatus.Failed;
+                    result.ErrorMessage    = atcError;
+                    result.NeedsReHarvest  = needsReHarvest;
+                    if (needsReHarvest)
+                        Log("WARN", $"[Target] Cookies expired (401) — requesting re-harvest", task.Id.ToString());
                     return result;
                 }
 

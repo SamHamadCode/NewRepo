@@ -1,4 +1,5 @@
 using System;
+using System;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using MonitorBot.Core.Enums;
 using MonitorBot.Core.Interfaces;
 using MonitorBot.Core.Models;
+using MonitorBot.Infrastructure.Checkout;
 
 namespace MonitorBot.Infrastructure.Monitoring
 {
@@ -16,14 +18,18 @@ namespace MonitorBot.Infrastructure.Monitoring
         private readonly ICheckoutService _checkout;
         private readonly IProfileRepository _profiles;
         private readonly IAccountRepository _accounts;
+        private readonly ITaskRepository _tasks;
         private readonly ILogger<MonitorService> _logger;
         private readonly ILogStore _logStore;
+        private readonly TargetLoginService _targetLogin;
+        private readonly WalmartLoginService _walmartLogin;
 
         private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeTasks = new();
 
         public event EventHandler<MonitorResult>? ResultReceived;
         public event EventHandler<MonitorTask>? TaskStatusChanged;
         public event EventHandler<CheckoutResult>? CheckoutCompleted;
+        public event EventHandler<MonitorTask>? ReHarvestRequested;
 
         public MonitorService(
             IProductChecker checker,
@@ -31,16 +37,22 @@ namespace MonitorBot.Infrastructure.Monitoring
             ICheckoutService checkout,
             IProfileRepository profiles,
             IAccountRepository accounts,
+            ITaskRepository tasks,
             ILogger<MonitorService> logger,
-            ILogStore logStore)
+            ILogStore logStore,
+            TargetLoginService targetLogin,
+            WalmartLoginService walmartLogin)
         {
             _checker = checker;
             _notifications = notifications;
             _checkout = checkout;
             _profiles = profiles;
             _accounts = accounts;
+            _tasks = tasks;
             _logger = logger;
             _logStore = logStore;
+            _targetLogin = targetLogin;
+            _walmartLogin = walmartLogin;
         }
 
         public bool IsRunning(Guid taskId) => _activeTasks.ContainsKey(taskId);
@@ -205,6 +217,53 @@ namespace MonitorBot.Infrastructure.Monitoring
             CheckoutCompleted?.Invoke(this, checkoutResult);
             LogCheckout(task, checkoutResult);
 
+            if (checkoutResult.NeedsReHarvest)
+            {
+                // Try silent automatic re-login if an account is assigned
+                if (account != null)
+                {
+                    LogInfo(task, "Cookies expired — attempting silent re-login");
+                    IAccountLoginService loginSvc = task.TargetUrl.ToLowerInvariant().Contains("walmart")
+                        ? _walmartLogin
+                        : _targetLogin;
+
+                    var freshCookies = await loginSvc.LoginAsync(account, ct);
+                    if (!string.IsNullOrEmpty(freshCookies))
+                    {
+                        task.CookieOverride = freshCookies;
+                        await _tasks.SaveAsync(task);
+                        LogInfo(task, "Silent re-login succeeded — retrying checkout");
+
+                        // Retry checkout once with fresh cookies
+                        var retryResult = await _checkout.CheckoutAsync(
+                            task, profile!, account, monitorResult,
+                            phase => UpdateStatus(task, phase), ct);
+
+                        task.CheckoutStatus = retryResult.Status;
+                        task.LastOrderId    = retryResult.OrderId;
+                        task.CheckoutError  = retryResult.ErrorMessage;
+                        CheckoutCompleted?.Invoke(this, retryResult);
+                        LogCheckout(task, retryResult);
+
+                        if (retryResult.IsSuccess)
+                        {
+                            task.LastResult = $"Ordered! #{retryResult.OrderId}";
+                            await _notifications.SendDesktopAsync("? Order Placed!",
+                                $"{task.Name}\nOrder ID: {retryResult.OrderId}");
+                        }
+                        return;
+                    }
+                    LogWarn(task, "Silent re-login failed — falling back to manual harvest");
+                }
+                else
+                {
+                    LogWarn(task, "Cookies expired and no account assigned — requesting manual re-harvest");
+                }
+
+                ReHarvestRequested?.Invoke(this, task);
+                return;
+            }
+
             if (checkoutResult.IsSuccess)
             {
                 task.LastResult = $"Ordered! #{checkoutResult.OrderId}";
@@ -252,5 +311,11 @@ namespace MonitorBot.Infrastructure.Monitoring
                 TaskId   = task.Id.ToString()
             });
         }
+
+        private void LogInfo(MonitorTask task, string message) =>
+            _logStore.Add(new LogEntry { Level = "INFO", Category = "Checkout", Message = $"[{task.Name}] {message}", TaskId = task.Id.ToString() });
+
+        private void LogWarn(MonitorTask task, string message) =>
+            _logStore.Add(new LogEntry { Level = "WARN", Category = "Checkout", Message = $"[{task.Name}] {message}", TaskId = task.Id.ToString() });
     }
 }

@@ -100,6 +100,17 @@ namespace MonitorBot.App
                 });
                 return instance!;
             });
+            services.AddSingleton<IWalmartBrowserStockChecker>(p =>
+            {
+                var logStore = p.GetRequiredService<ILogStore>();
+                MonitorBot.App.Views.WalmartBrowserStockChecker? instance = null;
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    instance = new MonitorBot.App.Views.WalmartBrowserStockChecker(logStore);
+                    instance.Show(); // required for WebView2 to initialize
+                });
+                return instance!;
+            });
             services.AddSingleton<TargetCheckoutService>();
             services.AddSingleton<ICheckoutService, CheckoutRouter>();
             services.AddSingleton<NotificationService>();
@@ -160,6 +171,8 @@ namespace MonitorBot.App
                 await _services.GetRequiredService<ILogStore>().FlushAsync();
             }
             base.OnExit(e);
+            // Force-kill any lingering background threads (HttpListener, Task.Run loops, etc.)
+            Environment.Exit(e.ApplicationExitCode);
         }
 
         private static void ShowToast(string title, string message)

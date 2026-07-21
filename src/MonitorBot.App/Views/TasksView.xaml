@@ -468,6 +468,11 @@
                                 <TextBlock Text="SKU (optional)" Style="{StaticResource TextLabel}"/>
                                 <TextBox Text="{Binding Selected.Sku, UpdateSourceTrigger=PropertyChanged}"/>
                             </StackPanel>
+                            <StackPanel Style="{StaticResource FormRow}">
+                                <TextBlock Text="OFFER ID (Walmart)" Style="{StaticResource TextLabel}"/>
+                                <TextBox Text="{Binding Selected.OfferIdOverride, UpdateSourceTrigger=PropertyChanged}"
+                                         ToolTip="Walmart only: paste the offerId from the product page to skip auto-detection"/>
+                            </StackPanel>
                         </StackPanel>
 
                         <Rectangle Width="1" Fill="{StaticResource Border}" Margin="0,0,24,0"/>

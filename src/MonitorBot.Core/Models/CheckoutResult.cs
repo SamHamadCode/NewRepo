@@ -12,5 +12,7 @@ namespace MonitorBot.Core.Models
         public string? ErrorMessage { get; set; }
         public decimal? ChargedAmount { get; set; }
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        /// <summary>True when cookies are expired or missing and a fresh harvest is needed.</summary>
+        public bool NeedsReHarvest { get; set; }
     }
 }

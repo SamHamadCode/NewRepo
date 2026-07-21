@@ -59,10 +59,19 @@ namespace MonitorBot.Infrastructure.Harvest
                     var ctx = await _listener!.GetContextAsync();
                     _ = HandleAsync(ctx);
                 }
+                catch (HttpListenerException)
+                {
+                    // Listener was stopped — exit cleanly
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     _logger.LogWarning(ex, "HarvestListener accept error");
-                    await Task.Delay(1000, ct);
+                    await Task.Delay(1000, ct).ConfigureAwait(false);
                 }
             }
         }
