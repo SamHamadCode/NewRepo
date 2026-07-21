@@ -31,6 +31,7 @@ namespace MonitorBot.Core.Models
         public bool AutoCheckout { get; set; } = false;
         public int Quantity { get; set; } = 1;
         public string? CookieOverride { get; set; }   // Manually pasted browser cookies for anti-bot bypass
+        public string? BearerOverride { get; set; }   // ID2 Authorization Bearer captured from browser extension
         public CheckoutStatus CheckoutStatus { get; set; } = CheckoutStatus.NotAttempted;
         public string? LastOrderId { get; set; }
         public string? CheckoutError { get; set; }

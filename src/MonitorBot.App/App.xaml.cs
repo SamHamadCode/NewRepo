@@ -107,6 +107,7 @@ namespace MonitorBot.App
             services.AddSingleton<IMonitorService, MonitorService>();
             services.AddSingleton<IUpdateService, UpdateService>();
             services.AddSingleton<IImportExportService, ImportExportService>();
+            services.AddSingleton<MonitorBot.Infrastructure.Harvest.HarvestListenerService>();
 
             // ViewModels
             services.AddSingleton<DashboardViewModel>();
@@ -136,6 +137,10 @@ namespace MonitorBot.App
                 ShowToast(args.Title, args.Message);
 
             var window = _services.GetRequiredService<MainWindow>();
+
+            // Start the extension harvest listener
+            _services.GetRequiredService<MonitorBot.Infrastructure.Harvest.HarvestListenerService>().Start();
+
             window.Show();
             }
             catch (Exception ex)
@@ -150,6 +155,7 @@ namespace MonitorBot.App
         {
             if (_services != null)
             {
+                _services.GetRequiredService<MonitorBot.Infrastructure.Harvest.HarvestListenerService>().Stop();
                 await _services.GetRequiredService<IMonitorService>().StopAllAsync();
                 await _services.GetRequiredService<ILogStore>().FlushAsync();
             }

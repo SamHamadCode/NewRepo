@@ -133,7 +133,7 @@ namespace MonitorBot.Infrastructure.Checkout
                     if (id2tok != null)
                         Log("INFO", $"[Target] Using ID2 token (target_access_token, len={id2tok.Length})");
                     else if (mi6tok != null)
-                        Log("WARN", $"[Target] Only MI6 token found (accessToken, len={mi6tok.Length}) — checkout GET init will fail. Re-harvest with items in cart to get target_access_token.");
+                        Log("INFO", $"[Target] Using MI6 token (accessToken, len={mi6tok.Length}) — cookie-only mode (no Bearer header)");
                     else
                         Log("WARN", "[Target] No auth token found in cookies");
                 }
@@ -155,9 +155,10 @@ namespace MonitorBot.Infrastructure.Checkout
                 // ── Step 3: Place order ────────────────────────────────────
                 onStatus?.Invoke(MonitorTaskStatus.PlacingOrder);
                 string? orderId, orderError;
-                if (_browserCheckout != null)
+                var hasId2Token = !string.IsNullOrEmpty(ExtractCookieValue(mergedCookies, "target_access_token"));
+                if (_browserCheckout != null && hasId2Token)
                 {
-                    // Use embedded browser checkout — the only method that gets a real ID2 token
+                    // Use embedded browser checkout — requires a real ID2 token
                     Log("INFO", "[Target] Using browser checkout (ID2 token path)");
                     var apiKey = await FetchApiKeyAsync(client, ct);
                     (orderId, orderError) = await _browserCheckout.RunAsync(
@@ -165,7 +166,10 @@ namespace MonitorBot.Infrastructure.Checkout
                 }
                 else
                 {
-                    Log("WARN", "[Target] Browser checkout not available — falling back to HTTP (may fail)");
+                    if (_browserCheckout != null && !hasId2Token)
+                        Log("INFO", "[Target] No ID2 token — using HTTP checkout (cookie-only/MI6 path)");
+                    else
+                        Log("INFO", "[Target] Using HTTP checkout");
                     (orderId, orderError) = await PlaceOrderAsync(client, cartId!, tcin, profile, quantity, ct);
                 }
                 if (string.IsNullOrEmpty(orderId))
@@ -418,14 +422,14 @@ namespace MonitorBot.Infrastructure.Checkout
             {
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", cookies);
 
-                // Prefer target_access_token (ID2) over accessToken (MI6).
-                // ID2 is accepted by both the cart and checkout endpoints.
-                // MI6 is only accepted by carts.target.com (ATC), not checkout.
-                var accessToken = ExtractCookieValue(cookies, "target_access_token")
-                               ?? ExtractCookieValue(cookies, "accessToken");
-                if (!string.IsNullOrEmpty(accessToken))
+                // Only set Authorization: Bearer when we have the ID2 token (target_access_token).
+                // MI6 (accessToken) is NOT accepted as a bearer by carts.target.com — the endpoints
+                // are cookie-only when only MI6 is available, so we omit the header entirely in
+                // that case and let the Cookie header carry the session.
+                var id2Token = ExtractCookieValue(cookies, "target_access_token");
+                if (!string.IsNullOrEmpty(id2Token))
                     client.DefaultRequestHeaders.TryAddWithoutValidation(
-                        "Authorization", $"Bearer {accessToken}");
+                        "Authorization", $"Bearer {id2Token}");
             }
 
             client.Timeout = TimeSpan.FromSeconds(30);
@@ -594,7 +598,7 @@ namespace MonitorBot.Infrastructure.Checkout
 
             // ── Step 1: GET — initialise checkout session ─────────────────
             // This call registers the cart on Target's checkout server so
-            // subsequent PATCHes know which session to modify.
+            // subsequent steps know which session to modify.
             var initUrl = $"{baseUrl}&cart_id={cartId}&field_groups=CHECKOUT%2CCART%2CPAYMENT%2CADDRESS";
             var (initOk, initBody) = await Send(HttpMethod.Get, initUrl, null);
             Log(initOk ? "INFO" : "WARN",
@@ -624,16 +628,57 @@ namespace MonitorBot.Infrastructure.Checkout
             if (!string.IsNullOrWhiteSpace(addr.Line2))
                 shippingAddr["line2"] = addr.Line2;
 
+            // ── Step 2: PUT — submit shipping address (cookie-only, no Bearer) ──
+            // The real endpoint for setting the shipping address is
+            // PUT /web_checkouts/v1/cart_shipping_addresses — it is cookie-only
+            // and rejects requests that carry an Authorization: Bearer header.
+            var shippingUrl = $"https://carts.target.com/web_checkouts/v1/cart_shipping_addresses?key={apiKey}&cart_id={cartId}&field_groups=CHECKOUT%2CCART%2CADDRESS";
+            var shippingPayload = new JObject
+            {
+                ["cart_id"]  = cartId,
+                ["address"]  = shippingAddr
+            };
+
+            // Build a cookie-only request — strip the Authorization header
+            async Task<(bool ok, string body)> SendCookieOnly(HttpMethod method, string url, JObject? payload)
+            {
+                using var r = new HttpRequestMessage(method, url);
+                r.Headers.TryAddWithoutValidation("Accept",             "application/json");
+                r.Headers.TryAddWithoutValidation("X-Api-Key",          apiKey);
+                r.Headers.TryAddWithoutValidation("X-Application-Name", "web");
+                r.Headers.TryAddWithoutValidation("Origin",             "https://www.target.com");
+                r.Headers.TryAddWithoutValidation("Referer",            "https://www.target.com/");
+                r.Headers.TryAddWithoutValidation("Accept-Language",    "en-US,en;q=0.9");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Site",     "same-site");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Mode",     "cors");
+                r.Headers.TryAddWithoutValidation("Sec-Fetch-Dest",     "empty");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA",          "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA-Mobile",   "?0");
+                r.Headers.TryAddWithoutValidation("Sec-CH-UA-Platform", "\"Windows\"");
+                // Deliberately omit Authorization — this endpoint is cookie-only
+                if (payload != null)
+                    r.Content = new StringContent(
+                        payload.ToString(Newtonsoft.Json.Formatting.None),
+                        Encoding.UTF8, "application/json");
+                var rs = await client.SendAsync(r, ct);
+                var b  = await rs.Content.ReadAsStringAsync(ct);
+                return (rs.IsSuccessStatusCode, b);
+            }
+
+            var (addrOk, addrBody) = await SendCookieOnly(HttpMethod.Put, shippingUrl, shippingPayload);
+            Log(addrOk ? "INFO" : "WARN",
+                $"[Target] PUT cart_shipping_addresses HTTP {(addrOk ? "OK" : "FAIL")}: {(addrBody.Length > 300 ? addrBody[..300] : addrBody)}");
+            if (!addrOk)
+                Log("WARN", "[Target] Shipping address PUT failed (continuing to order submission)");
+
             var billingLine1 = profile.BillingAddress?.Line1?.Length  > 0 ? profile.BillingAddress.Line1   : addr.Line1;
             var billingCity  = profile.BillingAddress?.City?.Length   > 0 ? profile.BillingAddress.City    : addr.City;
             var billingState = profile.BillingAddress?.State?.Length  > 0 ? profile.BillingAddress.State   : addr.State;
             var billingZip   = profile.BillingAddress?.ZipCode?.Length > 0 ? profile.BillingAddress.ZipCode : addr.ZipCode;
 
-            // ── Single POST — full checkout payload ───────────────────────
-            // Target's Go-Proxy blocks PATCH from non-browser clients regardless
-            // of CORS headers. POST is the only method accepted without a real
-            // browser TLS fingerprint. We send the complete checkout state in
-            // one POST (same shape used by Target's mobile app).
+            // ── Step 3: POST — place order ────────────────────────────────
+            // Address is already stored server-side via the PUT above, so it is
+            // not included here. Payment and guest identity are still required.
             var orderPayload = new JObject
             {
                 ["cart_id"]          = cartId,
@@ -646,7 +691,6 @@ namespace MonitorBot.Infrastructure.Checkout
                     ["first_name"]    = profile.FirstName,
                     ["last_name"]     = profile.LastName
                 },
-                ["addresses"] = new JArray { shippingAddr },
                 ["payment_instructions"] = new JArray
                 {
                     new JObject

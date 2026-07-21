@@ -318,10 +318,11 @@ namespace MonitorBot.App.ViewModels
             // Resolve start URL from group site ? task URL ? fallback
             string startUrl = ResolveHarvestUrl();
 
-            var win = new Views.CookieHarvesterWindow(startUrl)
-            {
-                Owner = Application.Current.MainWindow
-            };
+            var win = new Views.CookieHarvesterWindow(startUrl);
+
+            var main = Application.Current.MainWindow;
+            if (main != null && main.IsVisible)
+                win.Owner = main;
 
             if (win.ShowDialog() == true && !string.IsNullOrEmpty(win.HarvestedCookies))
             {

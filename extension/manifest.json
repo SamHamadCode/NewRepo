@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "MonitorBot Harvester",
+  "version": "1.0",
+  "description": "Harvests cookies and auth tokens from retail sites for MonitorBot",
+  "permissions": ["cookies", "webRequest", "storage", "tabs", "activeTab"],
+  "host_permissions": [
+    "*://*.target.com/*",
+    "*://*.walmart.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MonitorBot Harvester"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.target.com/*", "*://*.walmart.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
